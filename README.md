@@ -5,7 +5,7 @@ Minimal Layer 1 Blockchain & BFT Consensus Simulator.
 
 ## Requirements
 
-- Python 3.10 or newer (tested with Python 3.12)
+- Python 3.10 or newer (tested with Python 3.12+)
 - Git
 
 ## Setup
@@ -30,8 +30,9 @@ python -m pytest
 python -m src
 ```
 
-The project is split into five ownership areas. Shared data contracts belong in
-`src/common/interfaces.py`; implementations should preserve those contracts.
+The project is split into five ownership areas. Shared data contracts, typing protocols,
+and basic mocks belong in `src/interfaces.py` and `src/common/` (with basic mocks in `src/common/mocks.py`).
+Implementations should preserve those contracts.
 
 ```text
 blockchain-lab01/
@@ -39,7 +40,12 @@ blockchain-lab01/
 |-- docs/                    Design notes and diagrams
 |-- scripts/                 Developer helper scripts
 |-- src/
-|   |-- common/              Shared contracts, models, serialization
+|   |-- interfaces.py        Unified public contracts & mocks facade
+|   |-- common/              Shared contracts, models, serialization & mocks
+|   |   |-- interfaces.py    Core data models (frozen) & typing.Protocols
+|   |   |-- mocks.py         Mocks/Stubs for all 5 modules (TV1..TV5)
+|   |   |-- models.py        Domain model re-exports
+|   |   `-- serializer.py    Canonical encoding hook
 |   |-- crypto/              TV1: cryptography
 |   |-- execution/           TV2: state and ledger
 |   |-- network/             TV3: simulator, gossip, rate limiting
