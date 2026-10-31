@@ -1,4 +1,4 @@
-from src.interfaces import Transaction
+from src.common.interfaces import Transaction
 
 
 def test_shared_transaction_contract() -> None:
