@@ -1,0 +1,9 @@
+{
+  "chain_id": "lab01",
+  "validator_count": 8,
+  "random_seed": 42,
+  "network": {
+    "gst": 100,
+    "delta": 10
+  }
+}
