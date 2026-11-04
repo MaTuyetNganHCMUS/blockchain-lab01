@@ -1,0 +1,10 @@
+# Deterministic sample trace for blockchain-lab01
+# chain_id=lab01 validator_count=8 random_seed=42
+[0000.00] node=node0 event=PROPOSE H=1 R=0 detail=Proposed block
+[0000.00] node=node0 event=SEND H=1 R=0 detail=Broadcast proposal
+[0000.10] node=node1 event=PREVOTE H=1 R=0 detail=Prevote accepted
+[0000.10] node=node2 event=PREVOTE H=1 R=0 detail=Prevote accepted
+[0000.10] node=node3 event=PREVOTE H=1 R=0 detail=Prevote accepted
+[0000.20] node=node0 event=PRECOMMIT H=1 R=0 detail=Quorum reached
+[0000.20] node=node0 event=LOCK H=1 R=0 detail=Locked block
+[0000.30] node=node0 event=FINALIZE H=1 R=0 detail=Block finalized
