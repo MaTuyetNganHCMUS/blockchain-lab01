@@ -1,0 +1,10 @@
+[00000.00] node=node1 event=PREVOTE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8","voter":"node2"}
+[00000.01] node=node1 event=PREVOTE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8","voter":"node1"}
+[00000.02] node=node1 event=PREVOTE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8","voter":"node3"}
+[00000.03] node=node1 event=PREVOTE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8","voter":"node0"}
+[00001.00] node=node1 event=FINALIZE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8"}
+[00000.00] node=node3 event=PREVOTE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8","voter":"node3"}
+[00000.01] node=node3 event=PREVOTE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8","voter":"node2"}
+[00000.02] node=node3 event=PREVOTE H=1 R=0 detail={"block":"225931677ee91a892dd4661cc85cba1543bbb56284f6805c550119e8db1f130c","voter":"node0"}
+[00000.03] node=node3 event=PREVOTE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8","voter":"node1"}
+[00001.00] node=node3 event=FINALIZE H=1 R=0 detail={"block":"bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8"}

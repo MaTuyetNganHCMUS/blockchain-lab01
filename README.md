@@ -30,6 +30,15 @@ python -m pytest
 python -m src
 ```
 
+TV5 deterministic replay verification:
+
+```powershell
+python -m scripts.verify_tv5_determinism --seed 42 --output-dir logs/t8
+```
+
+The verified two-page TV5 report section is available at
+`output/pdf/tv5-locking-byzantine-report.pdf`.
+
 The project is split into five ownership areas. Shared data contracts, typing protocols,
 and basic mocks belong in `src/interfaces.py` and `src/common/` (with basic mocks in `src/common/mocks.py`).
 Implementations should preserve those contracts.
