@@ -79,5 +79,10 @@ The standalone command is:
 python -m scripts.verify_tv5_determinism --seed 42 --output-dir logs/t8
 ```
 
-At completion, the repository test suite reports 33 passing tests and Ruff
+The command writes `run-1.log`, `run-2.log`, and `results.json`. The JSON file
+records the validator/Byzantine counts, seed, both log hashes, finalized block,
+final state hash, and explicit PASS/FAIL values for T7 and T8. These files are
+the reproducible evidence attached to the TV5 deliverable.
+
+At completion, the repository test suite reports 34 passing tests and Ruff
 reports no findings in the TV5 source, tests, or script.

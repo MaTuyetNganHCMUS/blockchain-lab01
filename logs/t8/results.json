@@ -1,0 +1,19 @@
+{
+  "configuration": {
+    "byzantine_count": 1,
+    "seed": 42,
+    "validator_count": 4
+  },
+  "final_state_hash": "654698a006e8cdee6c249d932aa088ddbbc1cad4098284e52fb241b61f3b2f34",
+  "finalized_blocks": [
+    "bf3c9506082447007b64d915cadab0711df3406f019249a89bea80e5db4736a8"
+  ],
+  "log_hashes": {
+    "run_1": "3c5c2ac64672dc7a25746c1d5220d10cbe34f18277423def81a02bd2b9560afa",
+    "run_2": "3c5c2ac64672dc7a25746c1d5220d10cbe34f18277423def81a02bd2b9560afa"
+  },
+  "tests": {
+    "T7_byzantine_equivocation": "PASS",
+    "T8_deterministic_execution": "PASS"
+  }
+}
