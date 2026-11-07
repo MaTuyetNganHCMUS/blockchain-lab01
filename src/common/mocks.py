@@ -19,9 +19,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import hmac
-import struct
 from collections.abc import Sequence
-from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from .interfaces import (
@@ -32,6 +30,7 @@ from .interfaces import (
     Transaction,
     Vote,
 )
+from .serializer import encode_canonical as encode_shared_canonical
 
 # ==============================================================================
 # TV1 MOCK: CRYPTO & CANONICAL SERIALIZER
@@ -60,47 +59,8 @@ class MockCrypto:
         return hashlib.sha256(payload).digest()
 
     def encode_canonical(self, obj: Any) -> bytes:
-        """Deterministically encode Python objects into canonical byte representations.
-
-        Handles integers (8-byte big-endian), strings (length-prefixed UTF-8),
-        bytes, sequences, dictionaries (sorted keys), and dataclasses.
-        """
-        if obj is None:
-            return b"\x00"
-        if isinstance(obj, bool):
-            return b"\x01\x01" if obj else b"\x01\x00"
-        if isinstance(obj, int):
-            # 8-byte signed big-endian integer
-            return b"\x02" + obj.to_bytes(8, byteorder="big", signed=True)
-        if isinstance(obj, float):
-            return b"\x03" + struct.pack(">d", obj)
-        if isinstance(obj, (bytes, bytearray)):
-            raw = bytes(obj)
-            return b"\x04" + struct.pack(">I", len(raw)) + raw
-        if isinstance(obj, str):
-            encoded = obj.encode("utf-8")
-            return b"\x05" + struct.pack(">I", len(encoded)) + encoded
-        if is_dataclass(obj) and not isinstance(obj, type):
-            # Sort fields alphabetically by name for deterministic ordering
-            field_dict = asdict(obj)
-            return b"\x06" + self.encode_canonical(field_dict)
-        if isinstance(obj, dict):
-            # Sort keys by their string representation
-            sorted_items = sorted(obj.items(), key=lambda item: str(item[0]))
-            parts = [b"\x07", struct.pack(">I", len(sorted_items))]
-            for k, v in sorted_items:
-                parts.append(self.encode_canonical(k))
-                parts.append(self.encode_canonical(v))
-            return b"".join(parts)
-        if isinstance(obj, (list, tuple)):
-            parts = [b"\x08", struct.pack(">I", len(obj))]
-            for item in obj:
-                parts.append(self.encode_canonical(item))
-            return b"".join(parts)
-
-        # Fallback deterministic repr
-        raw_repr = repr(obj).encode("utf-8")
-        return b"\x09" + struct.pack(">I", len(raw_repr)) + raw_repr
+        """Use the production canonical encoder in mock integrations."""
+        return encode_shared_canonical(obj)
 
     def sign(self, priv_key: bytes, domain: str, payload_bytes: bytes) -> bytes:
         """Compute HMAC-SHA256 signature with explicit domain separation."""
