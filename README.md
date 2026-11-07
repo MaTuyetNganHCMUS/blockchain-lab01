@@ -7,6 +7,7 @@ Minimal Layer 1 Blockchain & BFT Consensus Simulator.
 
 - Python 3.10 or newer (tested with Python 3.12+)
 - Git
+- `cryptography` (installed by the project dependency)
 
 ## Setup
 
@@ -34,6 +35,22 @@ The project is split into five ownership areas. Shared data contracts, typing pr
 and basic mocks belong in `src/interfaces.py` and `src/common/` (with basic mocks in `src/common/mocks.py`).
 Implementations should preserve those contracts.
 
+## TV1 cryptography
+
+The current package layout keeps TV1 under `src/crypto/`:
+
+- `src/common/serializer.py`: tagged canonical encoding. Integers use signed
+  8-byte big-endian encoding, strings and bytes are length-prefixed, dataclass
+  fields preserve declaration order, and dictionary entries are sorted by
+  canonical key bytes.
+- `src/crypto/ed25519.py`: Ed25519 signing/verification and SHA-256.
+- `src/crypto/keys.py`: fixed validator-to-public-key registry.
+- `src/common/models.py`: shared immutable domain-model re-exports.
+
+Signatures always include the domain in the signed bytes. Use explicit domains
+such as `TX:<chain_id>`, `HEADER:<chain_id>`, and `VOTE:<chain_id>`. A
+signature from one domain or chain cannot verify in another.
+
 ```text
 blockchain-lab01/
 |-- config/                  Sample simulator configuration
@@ -46,7 +63,8 @@ blockchain-lab01/
 |   |   |-- mocks.py         Mocks/Stubs for all 5 modules (TV1..TV5)
 |   |   |-- models.py        Domain model re-exports
 |   |   `-- serializer.py    Canonical encoding hook
-|   |-- crypto/              TV1: cryptography
+|   |-- crypto/              TV1: Ed25519, SHA-256, canonical encoding & keys
+|   |-- common/              Shared models, contracts, and canonical serializer
 |   |-- execution/           TV2: state and ledger
 |   |-- network/             TV3: simulator, gossip, rate limiting
 |   |-- consensus/           TV4: FSM and validator node
