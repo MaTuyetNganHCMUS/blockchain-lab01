@@ -59,12 +59,25 @@ wall-clock time. These choices make log SHA-256 values independent of locale,
 platform newline conventions, dictionary insertion order, and floating-point
 display differences.
 
-## Test results
+## Consolidated test results (T1-T8)
 
 The TV5 unit suite covers ten duplicate deliveries, equivocation evidence,
 height/round/phase/voter rejection, chain-specific signature domains, separate
 PREVOTE/PRECOMMIT slots, lock/unlock behavior, Rule 3 precommit gating, all four
-Byzantine behaviors, the `f` bound, and byte-identical logger output.
+Byzantine behaviors, the `f` bound, and byte-identical logger output. The table
+below reports only evidence available on the TV5 branch; it does not claim that
+unmerged TV1-TV4 full-stack scenarios passed.
+
+| Test | Required scenario | Evidence on TV5 branch | Status |
+| --- | --- | --- | --- |
+| T1 | At least 8 nodes finalize the same chain/state | Requires integrated node, consensus and state stack | NOT RUN |
+| T2 | Duplicate/reordered packets do not double-execute transactions or count votes twice | Vote de-duplication passes; execution/reordering E2E still requires integration | PARTIAL |
+| T3 | Invalid signature/domain rejection | Vote-domain rejection passes; transaction E2E still requires integration | PARTIAL |
+| T4 | Transaction replay protection | Replay primitive passes; ledger E2E still requires integration | PARTIAL |
+| T5 | Network drop/delay safety and liveness | Requires integrated network scenarios | NOT RUN |
+| T6 | Proposer failure, timeout, round change and recovery | Requires integrated consensus FSM | NOT RUN |
+| T7 | Byzantine equivocation | One common finalized block and no conflicting fork | PASS |
+| T8 | Deterministic execution | Identical logs, finalized blocks and final state hash | PASS |
 
 Test T7 runs four validators with one equivocator. Node0 sends a vote for block A
 to one half and block B to the other; all honest validators vote for A. Both
@@ -86,3 +99,20 @@ the reproducible evidence attached to the TV5 deliverable.
 
 At completion, the repository test suite reports 34 passing tests and Ruff
 reports no findings in the TV5 source, tests, or script.
+
+## References
+
+1. Leslie Lamport, Robert Shostak, and Marshall Pease. “The Byzantine Generals
+   Problem.” *ACM Transactions on Programming Languages and Systems*, 4(3),
+   382–401, 1982. <https://doi.org/10.1145/357172.357176>
+2. Miguel Castro and Barbara Liskov. “Practical Byzantine Fault Tolerance.”
+   *3rd Symposium on Operating Systems Design and Implementation (OSDI)*, 1999.
+   <https://www.usenix.org/conference/osdi-99/practical-byzantine-fault-tolerance>
+3. Ethan Buchman, Jae Kwon, and Zarko Milosevic. “The latest gossip on BFT
+   consensus.” arXiv:1807.04938, 2018. <https://arxiv.org/abs/1807.04938>
+
+The two-page PDF is generated reproducibly with:
+
+```bash
+python -m scripts.generate_tv5_report
+```
