@@ -101,37 +101,19 @@ class StateEngine:
 
         return True, dry_run_state.get_state_hash()
 
-    def commit_block(
-        self,
-        block: BlockBody | BlockHeader,
-        body: BlockBody | None = None,
-    ) -> bytes:
+    def commit_block(self, block: BlockBody) -> bytes:
         """Apply all block transactions to the state and return resulting state hash.
 
         Satisfies StateProtocol: commit_block(self, block: BlockBody) -> bytes.
-        Also supports dual arguments: commit_block(self, header: BlockHeader, body: BlockBody).
         """
-        expected_state_hash: bytes | None = None
+        if not isinstance(block, BlockBody):
+            raise TypeError(f"Expected BlockBody, got {type(block).__name__}")
 
-        if isinstance(block, BlockHeader) and body is not None:
-            target_body = body
-            expected_state_hash = block.state_hash
-        elif isinstance(block, BlockBody):
-            target_body = block
-        else:
-            raise ValueError("Invalid arguments passed to commit_block")
-
-        for tx in target_body.transactions:
+        for tx in block.transactions:
             if not self.apply_transaction(tx):
                 raise ValueError(f"Invalid transaction in block: {tx}")
 
-        final_hash = self.get_state_hash()
-        if expected_state_hash is not None and final_hash != expected_state_hash:
-            raise ValueError(
-                f"State hash mismatch: expected {expected_state_hash.hex()}, "
-                f"got {final_hash.hex()}"
-            )
-        return final_hash
+        return self.get_state_hash()
 
 
 # Canonical alias for extension point compatibility
