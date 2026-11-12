@@ -30,7 +30,7 @@ class SimulatedNode:
         if not is_valid:
             return False
 
-        self.state.commit_block(header, body)
+        self.state.commit_block(body)
         self.ledger.add_finalized_block(header, body)
         return True
 
@@ -84,7 +84,7 @@ class TestE2EScenarios(unittest.TestCase):
             body = BlockBody(header_hash=compute_header_hash(header), transactions=block_txs)
 
             # Authority commits block
-            authority_state.commit_block(header, body)
+            authority_state.commit_block(body)
             authority_ledger.add_finalized_block(header, body)
 
             # Broadcast and commit block to all 8 nodes

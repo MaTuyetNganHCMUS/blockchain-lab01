@@ -147,7 +147,7 @@ class TestLedgerValidation(unittest.TestCase):
         self.assertTrue(is_valid, msg=f"Validation failed: {reason}")
 
         # Commit block
-        self.state.commit_block(header, body)
+        self.state.commit_block(body)
         self.ledger.add_finalized_block(header, body)
 
         self.assertEqual(self.ledger.height, 1)
