@@ -10,7 +10,7 @@ Wires together the five module components:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from ..common.interfaces import (
     CryptoProtocol,
@@ -90,6 +90,84 @@ class ValidatorNode:
             timeout_prevote=timeout_prevote,
             timeout_precommit=timeout_precommit,
         )
+
+    @classmethod
+    def create_integrated(
+        cls,
+        node_id: str,
+        validators: Sequence[str],
+        chain_id: str = "lab01",
+        priv_key: bytes | None = None,
+        pub_keys: Mapping[str, bytes] | None = None,
+        network: NetworkProtocol | None = None,
+        logger: LoggerProtocol | None = None,
+        initial_state: dict[str, str] | None = None,
+        require_vote_signatures: bool = True,
+        timeout_propose: float = 2.0,
+        timeout_prevote: float = 1.0,
+        timeout_precommit: float = 1.0,
+    ) -> ValidatorNode:
+        """Construct a ValidatorNode wired with all 5 real modules (TV1, TV2, TV3, TV4, TV5).
+
+        Defaults ``network`` to TV3's ``NetworkSimulator`` when omitted, and
+        automatically registers this node when ``network.register_node`` exists.
+        """
+        from ..crypto.ed25519 import Ed25519Crypto
+        from ..execution.ledger import Ledger
+        from ..execution.state import StateEngine
+        from ..network.simulator import NetworkSimulator
+        from ..observability.logger import DeterministicLogger
+        from ..security.locking import LockManager, VoteTracker
+
+        crypto = Ed25519Crypto()
+        state = StateEngine(initial_data=initial_state)
+        ledger = Ledger(with_genesis=True)
+
+        resolved_pub_keys = dict(pub_keys) if pub_keys is not None else {}
+        resolved_priv_key = priv_key
+        if resolved_priv_key is None:
+            resolved_priv_key, derived_pub = crypto.generate_keypair()
+            resolved_pub_keys.setdefault(node_id, derived_pub)
+
+        vote_tracker = VoteTracker(
+            validators=validators,
+            chain_id=chain_id,
+            expected_height=1,
+            crypto=crypto,
+            public_keys=resolved_pub_keys,
+            require_signatures=require_vote_signatures,
+        )
+        lock_manager = LockManager(
+            quorum_threshold=vote_tracker.quorum,
+            require_recorded_polka=True,
+        )
+        resolved_logger = logger if logger is not None else DeterministicLogger()
+        resolved_network: NetworkProtocol = (
+            network
+            if network is not None
+            else NetworkSimulator(nodes=validators, logger=resolved_logger)
+        )
+
+        node = cls(
+            node_id=node_id,
+            validators=validators,
+            chain_id=chain_id,
+            crypto=crypto,
+            state=state,
+            ledger=ledger,
+            network=resolved_network,
+            vote_tracker=vote_tracker,
+            lock_manager=lock_manager,
+            logger=resolved_logger,
+            priv_key=resolved_priv_key,
+            pub_keys=resolved_pub_keys,
+            timeout_propose=timeout_propose,
+            timeout_prevote=timeout_prevote,
+            timeout_precommit=timeout_precommit,
+        )
+        if hasattr(resolved_network, "register_node"):
+            resolved_network.register_node(node_id, node)
+        return node
 
     # ==========================================================================
     # PROPERTIES & GETTERS

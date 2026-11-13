@@ -114,6 +114,11 @@ class ConsensusFSM(ConsensusProtocol):
             self.priv_key = p_priv
             if pub_keys is None:
                 pub_keys = {self.node_id: p_pub}
+        elif hasattr(self.crypto, "generate_keypair"):
+            p_priv, p_pub = self.crypto.generate_keypair()
+            self.priv_key = p_priv
+            if pub_keys is None:
+                pub_keys = {self.node_id: p_pub}
         else:
             self.priv_key = b"default_priv_key_" + self.node_id.encode("utf-8")
 
@@ -164,6 +169,76 @@ class ConsensusFSM(ConsensusProtocol):
         return base + (round * self.timeout_delta)
 
     # ==========================================================================
+    # INTEGRATION ADAPTER HELPERS (TV1 / TV2 / TV5)
+    # ==========================================================================
+
+    def _safe_log(
+        self,
+        sim_time: float | int,
+        event_type: str,
+        detail: str,
+    ) -> None:
+        """Log consensus events while respecting strict logger schemas (TV5)."""
+        if event_type == "NEW_ROUND" and getattr(self.logger, "strict_event_types", False):
+            return
+        try:
+            self.logger.log(sim_time, self.node_id, event_type, self.height, self.round, detail)
+        except ValueError:
+            if event_type != "NEW_ROUND":
+                raise
+
+    def _expected_parent_hash(self) -> bytes:
+        """Resolve expected parent hash compatible with MockLedger and TV2 Ledger."""
+        if hasattr(self.ledger, "get_latest_hash"):
+            return self.ledger.get_latest_hash()
+        if self.finalized_blocks:
+            return self.crypto.hash_bytes(
+                self.crypto.encode_canonical(self.finalized_blocks[-1][0])
+            )
+        return GENESIS_PARENT_HASH
+
+    def _compute_tx_root(self, txs: tuple[Transaction, ...]) -> bytes:
+        """Compute tx_root using TV2 commitment helper when TV2 Ledger is wired."""
+        if hasattr(self.ledger, "validate_block"):
+            from ..execution.commitment import compute_tx_hash, compute_tx_root
+
+            return compute_tx_root([compute_tx_hash(tx) for tx in txs])
+        return self.crypto.hash_bytes(self.crypto.encode_canonical(txs))
+
+    def _compute_header_hash(self, header: BlockHeader) -> bytes:
+        """Compute canonical block header hash aligned with wired ledger."""
+        if hasattr(self.ledger, "validate_block"):
+            from ..execution.commitment import compute_header_hash
+
+            return compute_header_hash(header)
+        return self.crypto.hash_bytes(self.crypto.encode_canonical(header))
+
+    def _select_valid_mempool_txs(self) -> tuple[tuple[Transaction, ...], bytes]:
+        """Select valid mempool transactions and compute resulting candidate state hash."""
+        candidate = tuple(self.mempool)
+        ok, state_hash = self.state.validate_and_compute_hash(candidate)
+        if ok:
+            return candidate, state_hash
+
+        accepted: list[Transaction] = []
+        for tx in candidate:
+            trial = tuple(accepted + [tx])
+            tx_ok, _ = self.state.validate_and_compute_hash(trial)
+            if tx_ok:
+                accepted.append(tx)
+        final_txs = tuple(accepted)
+        _, final_hash = self.state.validate_and_compute_hash(final_txs)
+        return final_txs, final_hash
+
+    def _vote_signing_payload(self, unsigned_vote: Vote) -> bytes:
+        """Compute signing payload aligned with MockVoteTracker or TV5 VoteTracker."""
+        if hasattr(self.vote_tracker, "vote_domain"):
+            from ..security.locking import vote_signing_bytes
+
+            return vote_signing_bytes(unsigned_vote)
+        return self.crypto.encode_canonical(unsigned_vote)
+
+    # ==========================================================================
     # LIFECYCLE: START HEIGHT & ROUND
     # ==========================================================================
 
@@ -176,9 +251,22 @@ class ConsensusFSM(ConsensusProtocol):
         self.valid_block = None
         self.valid_round = -1
         self.round_advanced.clear()
-        if hasattr(self.lock_manager, "unlock"):
+        if hasattr(self.vote_tracker, "set_expected_height"):
+            self.vote_tracker.set_expected_height(height)
+        if hasattr(self.lock_manager, "start_height"):
+            self.lock_manager.start_height(height)
+        elif hasattr(self.lock_manager, "unlock"):
             self.lock_manager.unlock()
         self.start_round(sim_time, 0)
+
+    def _schedule_step_timeout(self, step: str, base_delay: float) -> None:
+        """Schedule discrete-event timeout using TV3 'H:R:STEP' tag convention."""
+        delay = self.get_timeout_delay(base_delay, self.round)
+        self.network.schedule_timeout(
+            self.node_id,
+            delay,
+            f"{self.height}:{self.round}:{step}",
+        )
 
     def start_round(self, sim_time: float | int, round: int) -> None:
         """Initialize or advance to round R at current height H."""
@@ -186,22 +274,10 @@ class ConsensusFSM(ConsensusProtocol):
         self.step = STEP_NEW_ROUND
 
         proposer = self.get_proposer(self.height, self.round)
-        self.logger.log(
-            sim_time,
-            self.node_id,
-            "NEW_ROUND",
-            self.height,
-            self.round,
-            f"proposer={proposer}",
-        )
+        self._safe_log(sim_time, "NEW_ROUND", f"proposer={proposer}")
 
         # Schedule propose timeout
-        delay_propose = self.get_timeout_delay(self.timeout_propose, self.round)
-        self.network.schedule_timeout(
-            self.node_id,
-            delay_propose,
-            f"TIMEOUT_PROPOSE:{self.height}:{self.round}",
-        )
+        self._schedule_step_timeout(STEP_PROPOSE, self.timeout_propose)
 
         if self.is_current_proposer():
             # Designated proposer proposes a block
@@ -216,11 +292,7 @@ class ConsensusFSM(ConsensusProtocol):
 
     def _propose_block(self, sim_time: float | int) -> None:
         """Create, sign, and broadcast proposal block."""
-        parent_hash = GENESIS_PARENT_HASH
-        if self.finalized_blocks:
-            parent_hash = self.crypto.hash_bytes(
-                self.crypto.encode_canonical(self.finalized_blocks[-1][0])
-            )
+        parent_hash = self._expected_parent_hash()
 
         if self.locked_block is not None and self.locked_block in self.block_cache:
             # Re-propose locked block
@@ -235,10 +307,9 @@ class ConsensusFSM(ConsensusProtocol):
             )
             txs = cached_body.transactions
         else:
-            # Propose fresh transactions from mempool
-            txs = tuple(self.mempool)
-            _, state_hash = self.state.validate_and_compute_hash(txs)
-            tx_root = self.crypto.hash_bytes(self.crypto.encode_canonical(txs))
+            # Propose valid transactions from mempool
+            txs, state_hash = self._select_valid_mempool_txs()
+            tx_root = self._compute_tx_root(txs)
             header = BlockHeader(
                 height=self.height,
                 round=self.round,
@@ -265,7 +336,7 @@ class ConsensusFSM(ConsensusProtocol):
             sig=hdr_sig,
         )
 
-        header_hash = self.crypto.hash_bytes(self.crypto.encode_canonical(signed_header))
+        header_hash = self._compute_header_hash(signed_header)
         body = BlockBody(header_hash=header_hash, transactions=txs)
 
         # Cache locally
@@ -337,7 +408,7 @@ class ConsensusFSM(ConsensusProtocol):
             self._evaluate_proposal_and_prevote(sim_time, header, body)
         else:
             # Request block body from proposer
-            hdr_hash = self.crypto.hash_bytes(self.crypto.encode_canonical(header))
+            hdr_hash = self._compute_header_hash(header)
             req_packet = pack_message(MSG_BODY_REQUEST, hdr_hash)
             self.network.send(self.node_id, header.proposer, req_packet)
 
@@ -346,7 +417,7 @@ class ConsensusFSM(ConsensusProtocol):
         existing = self.proposals.get((self.height, self.round))
         if existing and existing[0]:
             header = existing[0]
-            header_hash = self.crypto.hash_bytes(self.crypto.encode_canonical(header))
+            header_hash = self._compute_header_hash(header)
             if body.header_hash == header_hash:
                 self.proposals[(self.height, self.round)] = (header, body)
                 self.block_cache[header_hash] = (header, body)
@@ -363,30 +434,35 @@ class ConsensusFSM(ConsensusProtocol):
             # Rule 1: already prevoted for this round
             return
 
-        header_hash = self.crypto.hash_bytes(self.crypto.encode_canonical(header))
+        header_hash = self._compute_header_hash(header)
         if body is not None:
             self.block_cache[header_hash] = (header, body)
 
-        # 1. Validate Parent Link
-        expected_parent = GENESIS_PARENT_HASH
-        if self.finalized_blocks:
-            expected_parent = self.crypto.hash_bytes(
-                self.crypto.encode_canonical(self.finalized_blocks[-1][0])
-            )
-        if header.parent_hash != expected_parent:
-            self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
-            self.step = STEP_PREVOTE
-            self._schedule_prevote_timeout()
-            return
-
-        # 2. Validate Transactions & State Hash
-        if body is not None:
-            valid_txs, computed_state_hash = self.state.validate_and_compute_hash(body.transactions)
-            if not valid_txs or computed_state_hash != header.state_hash:
-                self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
+        # 1 & 2. Validate Block (TV2 full ledger validation when available)
+        if body is not None and hasattr(self.ledger, "validate_block"):
+            is_valid_block, _ = self.ledger.validate_block(header, body, self.state)
+            if not is_valid_block:
                 self.step = STEP_PREVOTE
+                self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
                 self._schedule_prevote_timeout()
                 return
+        else:
+            expected_parent = self._expected_parent_hash()
+            if header.parent_hash != expected_parent:
+                self.step = STEP_PREVOTE
+                self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
+                self._schedule_prevote_timeout()
+                return
+
+            if body is not None:
+                valid_txs, computed_state_hash = self.state.validate_and_compute_hash(
+                    body.transactions
+                )
+                if not valid_txs or computed_state_hash != header.state_hash:
+                    self.step = STEP_PREVOTE
+                    self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
+                    self._schedule_prevote_timeout()
+                    return
 
         # 3. Check Locking Rules (Rule 4, 5)
         can_prevote = self.lock_manager.can_prevote(
@@ -396,17 +472,12 @@ class ConsensusFSM(ConsensusProtocol):
         )
 
         vote_hash = header_hash if can_prevote else NIL_BLOCK_HASH
-        self.cast_vote(sim_time, PHASE_PREVOTE, vote_hash)
         self.step = STEP_PREVOTE
+        self.cast_vote(sim_time, PHASE_PREVOTE, vote_hash)
         self._schedule_prevote_timeout()
 
     def _schedule_prevote_timeout(self) -> None:
-        delay = self.get_timeout_delay(self.timeout_prevote, self.round)
-        self.network.schedule_timeout(
-            self.node_id,
-            delay,
-            f"TIMEOUT_PREVOTE:{self.height}:{self.round}",
-        )
+        self._schedule_step_timeout(STEP_PREVOTE, self.timeout_prevote)
 
     # ==========================================================================
     # VOTE CASTING & VOTE HANDLING
@@ -429,11 +500,11 @@ class ConsensusFSM(ConsensusProtocol):
             block_hash=block_hash,
             voter=self.node_id,
         )
-        vote_canonical = self.crypto.encode_canonical(unsigned_vote)
+        vote_payload = self._vote_signing_payload(unsigned_vote)
         sig = self.crypto.sign(
             self.priv_key,
             f"{DOMAIN_VOTE}:{self.chain_id}",
-            vote_canonical,
+            vote_payload,
         )
         signed_vote = Vote(
             height=self.height,
@@ -444,13 +515,13 @@ class ConsensusFSM(ConsensusProtocol):
             sig=sig,
         )
 
+        if hasattr(self.lock_manager, "record_local_vote"):
+            self.lock_manager.record_local_vote(signed_vote)
+
         self.votes_cast.append(signed_vote)
-        self.logger.log(
+        self._safe_log(
             sim_time,
-            self.node_id,
             event_type,
-            self.height,
-            self.round,
             f"hash={block_hash.hex()[:16] if block_hash != NIL_BLOCK_HASH else 'NIL'}",
         )
 
@@ -460,8 +531,9 @@ class ConsensusFSM(ConsensusProtocol):
             if peer != self.node_id:
                 self.network.send(self.node_id, peer, packed_vote)
 
-        # Feed to local tracker
-        self.vote_tracker.add_vote(signed_vote)
+        # Feed to local tracker and evaluate immediate quorum completion
+        quorum_res = self.vote_tracker.add_vote(signed_vote)
+        self._handle_quorum_result(sim_time, phase, quorum_res)
         return signed_vote
 
     def on_vote(self, sim_time: float | int, vote: Vote) -> None:
@@ -479,58 +551,60 @@ class ConsensusFSM(ConsensusProtocol):
                 block_hash=vote.block_hash,
                 voter=vote.voter,
             )
-            canonical = self.crypto.encode_canonical(unsigned)
+            vote_payload = self._vote_signing_payload(unsigned)
             if not self.crypto.verify(
                 pub_key,
                 f"{DOMAIN_VOTE}:{self.chain_id}",
-                canonical,
+                vote_payload,
                 vote.sig,
             ):
                 return
 
         quorum_res = self.vote_tracker.add_vote(vote)
+        self._handle_quorum_result(sim_time, vote.phase, quorum_res)
 
-        if vote.phase == PHASE_PREVOTE:
-            if quorum_res.has_quorum and (self.height, self.round) not in self.precommitted_rounds:
+    def _handle_quorum_result(self, sim_time: float | int, phase: str, quorum_res: Any) -> None:
+        """Process quorum transition after a PREVOTE or PRECOMMIT vote."""
+        if not quorum_res.has_quorum or quorum_res.round != self.round:
+            return
+
+        if phase == PHASE_PREVOTE:
+            if (self.height, self.round) not in self.precommitted_rounds:
+                if hasattr(self.lock_manager, "observe_quorum"):
+                    self.lock_manager.observe_quorum(quorum_res)
                 if quorum_res.block_hash != NIL_BLOCK_HASH:
                     # Polka on block B -> Lock on B (Rule 4)
                     self.locked_block = quorum_res.block_hash
                     self.locked_round = self.round
                     self.valid_block = quorum_res.block_hash
                     self.valid_round = self.round
-                    self.lock_manager.record_lock(quorum_res.block_hash, self.round)
+                    if not hasattr(self.lock_manager, "observe_quorum"):
+                        self.lock_manager.record_lock(quorum_res.block_hash, self.round)
 
-                    self.logger.log(
+                    self._safe_log(
                         sim_time,
-                        self.node_id,
                         EVENT_LOCK,
-                        self.height,
-                        self.round,
                         f"hash={quorum_res.block_hash.hex()[:16]}",
                     )
+                    self.step = STEP_PRECOMMIT
                     self.cast_vote(sim_time, PHASE_PRECOMMIT, quorum_res.block_hash)
                 else:
                     # Quorum on NIL -> Precommit NIL
+                    self.step = STEP_PRECOMMIT
                     self.cast_vote(sim_time, PHASE_PRECOMMIT, NIL_BLOCK_HASH)
 
-                self.step = STEP_PRECOMMIT
-                delay = self.get_timeout_delay(self.timeout_precommit, self.round)
-                self.network.schedule_timeout(
-                    self.node_id,
-                    delay,
-                    f"TIMEOUT_PRECOMMIT:{self.height}:{self.round}",
-                )
+                if self.step == STEP_PRECOMMIT:
+                    self._schedule_step_timeout(STEP_PRECOMMIT, self.timeout_precommit)
 
-        elif vote.phase == PHASE_PRECOMMIT:
-            if quorum_res.has_quorum:
-                if quorum_res.block_hash != NIL_BLOCK_HASH:
-                    # Finalize block!
-                    self._finalize_block(sim_time, quorum_res.block_hash)
-                else:
-                    # Quorum of Precommit NIL -> Advance round once
-                    if (self.height, self.round) not in self.round_advanced:
-                        self.round_advanced.add((self.height, self.round))
-                        self.start_round(sim_time, self.round + 1)
+        elif phase == PHASE_PRECOMMIT:
+            if quorum_res.block_hash != NIL_BLOCK_HASH:
+                # Finalize block!
+                self._finalize_block(sim_time, quorum_res.block_hash)
+            else:
+                # Quorum of Precommit NIL -> Advance round once
+                if (self.height, self.round) not in self.round_advanced:
+                    self.round_advanced.add((self.height, self.round))
+                    self.start_round(sim_time, self.round + 1)
 
     def _finalize_block(self, sim_time: float | int, block_hash: bytes) -> None:
         """Commit finalized block to state and ledger, then advance height."""
@@ -545,7 +619,7 @@ class ConsensusFSM(ConsensusProtocol):
             cached_hdr = BlockHeader(
                 height=self.height,
                 round=self.round,
-                parent_hash=GENESIS_PARENT_HASH,
+                parent_hash=self._expected_parent_hash(),
                 state_hash=b"",
                 tx_root=b"",
                 proposer=self.get_proposer(self.height, self.round),
@@ -558,12 +632,9 @@ class ConsensusFSM(ConsensusProtocol):
         self.ledger.add_finalized_block(header, body)
         self.finalized_blocks.append((header, body))
 
-        self.logger.log(
+        self._safe_log(
             sim_time,
-            self.node_id,
             EVENT_FINALIZE,
-            self.height,
-            self.round,
             f"hash={block_hash.hex()[:16]} height={self.height}",
         )
 
@@ -604,9 +675,10 @@ class ConsensusFSM(ConsensusProtocol):
             return
 
         # Proposer failed to propose in time: prevote NIL
-        self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
         self.step = STEP_PREVOTE
-        self._schedule_prevote_timeout()
+        self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
+        if self.step == STEP_PREVOTE:
+            self._schedule_prevote_timeout()
 
     def on_timeout_prevote(self, sim_time: float | int, height: int, round: int) -> None:
         """Handle prevote timeout (quorum of prevotes not reached)."""
@@ -616,14 +688,10 @@ class ConsensusFSM(ConsensusProtocol):
             return
 
         # Prevote timeout reached: precommit NIL
-        self.cast_vote(sim_time, PHASE_PRECOMMIT, NIL_BLOCK_HASH)
         self.step = STEP_PRECOMMIT
-        delay = self.get_timeout_delay(self.timeout_precommit, self.round)
-        self.network.schedule_timeout(
-            self.node_id,
-            delay,
-            f"TIMEOUT_PRECOMMIT:{self.height}:{self.round}",
-        )
+        self.cast_vote(sim_time, PHASE_PRECOMMIT, NIL_BLOCK_HASH)
+        if self.step == STEP_PRECOMMIT:
+            self._schedule_step_timeout(STEP_PRECOMMIT, self.timeout_precommit)
 
     def on_timeout_precommit(self, sim_time: float | int, height: int, round: int) -> None:
         """Handle precommit timeout (block not finalized): advance to next round."""
