@@ -200,3 +200,35 @@ Mô phỏng mạng gồm 8 validator ($n = 8, f = 2$, túc số Quorum $2f + 1 =
 3. **Kiểm chứng Tính Tất định (Test T8 alignment)**:
    * Chạy lại kịch bản 2 lần với cùng seed 777 cho ra số lượng gói gửi (sent), số gói nhận (delivered), số gói rớt (dropped) và mốc thời gian hoàn tất giống nhau tuyệt đối từng byte.
 
+
+---
+
+### 7. Ghi chú Triển khai & Xử lý các Lỗi Phi hiển nhiên (Implementation Notes & Non-trivial Bugs)
+
+Theo yêu cầu của mục Hướng dẫn Báo cáo trong đề bài Lab 01 (*"Include some non-trivial bugs and how you resolved them"*), phân hệ mạng đã phát hiện và xử lý triệt để 3 lỗi kỹ thuật phức tạp trong quá trình hiện thực:
+
+#### 7.1. Lỗi Khóa nhầm khi Broadcast (False-Positive Spam Detection in Broadcast)
+* **Hiện tượng**: Trong kịch bản Test T5 với $n = 8$ validator, khi Proposer thực hiện broadcast đề xuất khối hoặc khi các node đồng loạt phát tán PRECOMMIT, nút gửi phát ra 7-8 gói tin gần như cùng một tích tắc thời gian ảo. Nếu `RateLimiter` chỉ theo dõi số lượng thông điệp theo một khóa duy nhất là `sender_id`, hệ thống hiểu nhầm đây là hành vi spam từ chối dịch vụ và lập tức kích hoạt `EVENT_BLOCK`, dẫn đến việc các gói tin gửi đến các node cuối (như `node_7`) bị rớt oan uổng, làm node bị thiếu phiếu đồng thuận.
+* **Cách khắc phục**: Tái cấu trúc cơ chế định danh sang dạng khóa kép `key = f"{receiver_id}:{peer_id}"`. Mỗi validator giờ đây sở hữu một hạn mức inbound riêng biệt đối với từng peer. Việc một Proposer phát sóng 1 gói tin cho 8 peer khác nhau sẽ được tính là 1 đơn vị tải đối với mỗi peer, ngăn chặn hoàn toàn hiện tượng nhận diện sai (false-positive).
+
+#### 7.2. Lỗi Đóng băng Đồng hồ Thời gian ảo trong `run_until()` (Simulation Clock Freezing)
+* **Hiện tượng**: Khi gọi `sim.run_until(max_time)` để đưa mạng vượt qua mốc ổn định $T_{\text{GST}} = 25.0\text{s}$, nếu hàng đợi sự kiện `_queue` đã được xử lý hết tại thời điểm $t = 7.43\text{s}$, vòng lặp thoát sớm và biến `current_time` bị đóng băng tại $7.43\text{s}$. Khi bước sang Phase 2 (Post-GST), mạng vẫn ngộ nhận mình đang ở $t < T_{\text{GST}}$ và tiếp tục áp dụng tỷ lệ rớt gói $35\%$.
+* **Cách khắc phục**: Trong phương thức `run_until(max_time)`, bổ sung đoạn mã kiểm tra sau vòng lặp:
+  $$\text{if } \text{self.current\_time} < \text{target\_time}: \quad \text{self.current\_time} \leftarrow \text{target\_time}$$
+  Đồng thời tự động kích hoạt `unblock_expired(self.current_time)` để giải phóng các hình phạt đã hết hạn đúng theo tiến trình thời gian ảo.
+
+#### 7.3. Lỗi So sánh Kiểu Dữ liệu trong Hàng đợi Ưu tiên (`TypeError` in Tuple Tie-Breaking)
+* **Hiện tượng**: Khi nhiều thông điệp hoặc timer được lên lịch tại cùng một mốc thời gian ảo chính xác ($t_1 = t_2$), thuật toán heap của Python sẽ tiếp tục so sánh phần tử tiếp theo trong tuple. Nếu lưu trực tiếp đối tượng gói tin `NetPacket`, Python sẽ ném ngoại lệ `TypeError: '<' not supported between instances of 'NetPacket'`.
+* **Cách khắc phục**: Thiết lập tuple 4 phần tử có biến đếm tự tăng ngặt:
+  $$\big(t_{\text{delivery}}, \text{\_seq}, \text{event\_type}, \text{data}\big)$$
+  Vì `_seq` luôn khác biệt đối với mọi sự kiện, phép so sánh của `heapq` luôn dừng lại ở phần tử thứ 2, vừa triệt tiêu lỗi runtime, vừa bảo đảm thứ tự phục vụ FIFO tuyệt đối giữa các gói tin cùng thời điểm đến.
+
+---
+
+### 8. Hướng dẫn Tự Ôn tập Vấn đáp Chéo (Oral Defense Preparation)
+
+Tuân thủ quy trình chuẩn bị vấn đáp chéo tại Mục 5 của `job_list.txt`:
+* **Câu hỏi cốt lõi**: *"Hãy tự tay viết lại phương thức `step()` của `NetworkSimulator` và giải thích tại sao tuple trong `heapq` bắt buộc phải có biến `_seq`?"*
+* **Đáp án chuẩn**:
+  1. Hàng đợi ưu tiên lưu phần tử `(delivery_time, seq_id, event_type, data)`. Khi hai gói tin được phát cùng lúc ($t_1 = t_2$), Python sẽ so sánh phần tử kế tiếp là `seq_id`.
+  2. Vì `_seq` là biến đếm tăng đơn điệu ($0, 1, 2, \dots$), giá trị của nó luôn phân biệt đối với mọi sự kiện. Nhờ đó, Python không bao giờ phải so sánh trường `data` (tránh lỗi `TypeError`), đồng thời bảo toàn trật tự FIFO tuyệt đối giữa các sự kiện cùng timestamp, đảm bảo tính tất định 100% giữa các lần chạy lại.
