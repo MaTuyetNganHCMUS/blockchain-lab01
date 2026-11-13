@@ -1,0 +1,20 @@
+{
+  "chain_id": "lab01-unreliable",
+  "validator_count": 8,
+  "random_seed": 1042,
+  "network": {
+    "gst": 30.0,
+    "delta": 2.0,
+    "min_delay": 0.05,
+    "max_delay_pre_gst": 10.0,
+    "drop_rate_pre_gst": 0.3,
+    "dup_rate_pre_gst": 0.15
+  },
+  "rate_limiter": {
+    "max_requests_per_window": 15,
+    "window_seconds": 1.0,
+    "block_duration": 4.0,
+    "max_outbound_per_window": 30,
+    "outbound_window_seconds": 1.0
+  }
+}
