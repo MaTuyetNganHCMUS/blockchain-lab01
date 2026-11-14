@@ -66,4 +66,33 @@ def verify(public_key: bytes, domain: str, payload: bytes, signature: bytes) -> 
     return True
 
 
-__all__ = ["encode_canonical", "generate_keypair", "hash_bytes", "sign", "verify"]
+class Ed25519Crypto:
+    """CryptoProtocol adapter wrapping TV1's Ed25519 and SHA-256 primitives."""
+
+    def encode_canonical(self, obj: object) -> bytes:
+        return encode_canonical(obj)
+
+    def hash_bytes(self, payload: bytes) -> bytes:
+        return hash_bytes(payload)
+
+    def generate_keypair(self) -> tuple[bytes, bytes]:
+        return generate_keypair()
+
+    def sign(self, priv_key: bytes, domain: str, payload_bytes: bytes) -> bytes:
+        return sign(priv_key, domain, payload_bytes)
+
+    def verify(self, pub_key: bytes, domain: str, payload_bytes: bytes, sig: bytes) -> bool:
+        return verify(pub_key, domain, payload_bytes, sig)
+
+
+CryptoService = Ed25519Crypto
+
+__all__ = [
+    "CryptoService",
+    "Ed25519Crypto",
+    "encode_canonical",
+    "generate_keypair",
+    "hash_bytes",
+    "sign",
+    "verify",
+]
