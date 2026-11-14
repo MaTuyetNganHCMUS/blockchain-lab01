@@ -3,9 +3,10 @@ Owner: TV2 (Execution Engine & State Commitment)
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from ..common.interfaces import BlockBody, BlockHeader, Transaction
+from ..common.interfaces import BlockBody, BlockHeader, CryptoProtocol, Transaction
+from ..common.serializer import encode_canonical
 from .commitment import compute_state_commitment, compute_tx_hash
 
 
@@ -13,21 +14,35 @@ class StateEngine:
     """Deterministic Key-Value State Engine satisfying StateProtocol.
 
     Enforces:
-    1. Prefix-based Access Control: Sender 'X' can only write to key 'X/...'.
-    2. Replay Protection: Sequential nonces and executed tx hash tracking.
-    3. Dry-run Isolation: Ability to validate tx lists without mutating base state.
-    4. Deterministic State Commitment: Merkle root of lexicographically sorted key-value pairs.
+    1. Signature Verification: Valid signature under TX:<chain_id> domain when sender key is registered.
+    2. Prefix-based Access Control: Sender 'X' can only write to key 'X/...'.
+    3. Replay Protection: Sequential nonces and executed tx hash tracking.
+    4. Dry-run Isolation: Ability to validate tx lists without mutating base state.
+    5. Deterministic State Commitment: Merkle root of lexicographically sorted key-value pairs.
     """
 
-    def __init__(self, initial_data: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        initial_data: dict[str, str] | None = None,
+        crypto: CryptoProtocol | None = None,
+        pub_keys: Mapping[str, bytes] | None = None,
+        chain_id: str = "lab01",
+    ) -> None:
         self._data: dict[str, str] = dict(initial_data) if initial_data else {}
         self._nonces: dict[str, int] = {}
         self._executed_tx_hashes: set[bytes] = set()
+        self.crypto = crypto
+        self.pub_keys = dict(pub_keys) if pub_keys else {}
+        self.chain_id = chain_id
 
     def clone(self) -> StateEngine:
         """Produce an isolated deep clone of the state engine for dry-runs."""
-        cloned = StateEngine()
-        cloned._data = dict(self._data)
+        cloned = StateEngine(
+            initial_data=self._data,
+            crypto=self.crypto,
+            pub_keys=self.pub_keys,
+            chain_id=self.chain_id,
+        )
         cloned._nonces = dict(self._nonces)
         cloned._executed_tx_hashes = set(self._executed_tx_hashes)
         return cloned
@@ -56,10 +71,24 @@ class StateEngine:
         """Validate and apply a single transaction to the state.
 
         Rules:
+        - Cryptographic signature must verify under TX:<chain_id> if sender key is registered
         - Sender 'Alice' can only write to 'Alice/...'
         - tx.nonce must be incremental (supports 0-based or 1-based initial nonce)
         - tx_hash must not be previously executed
         """
+        # Rule 0: Cryptographic Signature Verification (Section 7 Lab01)
+        if self.crypto is not None and tx.sender in self.pub_keys:
+            if not tx.sig:
+                return False
+            payload = encode_canonical((tx.sender, tx.key, tx.value, tx.nonce))
+            if not self.crypto.verify(
+                self.pub_keys[tx.sender],
+                f"TX:{self.chain_id}",
+                payload,
+                tx.sig,
+            ):
+                return False
+
         # Rule 1: Ownership Access Control
         expected_prefix = f"{tx.sender}/"
         if not tx.key.startswith(expected_prefix):

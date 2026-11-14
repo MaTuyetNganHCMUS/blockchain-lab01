@@ -26,17 +26,19 @@ Tầng Execution đóng vai trò là hạt nhân xử lý logic nghiệp vụ v�
                                ▼
         ┌─────────────────────────────────────────────────────────────┐
         │            StateEngine (Thực thi giao dịch)                 │
-        │  1. Kiểm tra quyền sở hữu khóa: 'Sender/' prefix check      │
-        │  2. Kiểm tra Replay Attack: Nonce & Tx Hash tracking        │
-        │  3. Áp dụng biến đổi trạng thái trong bộ nhớ tạm (Dry-run)  │
+        │  1. Xác thực chữ ký Ed25519 (domain TX:chain_id)           │
+        │  2. Kiểm tra quyền sở hữu khóa: 'Sender/' prefix check      │
+        │  3. Kiểm tra Replay Attack: Nonce & Tx Hash tracking        │
+        │  4. Áp dụng biến đổi trạng thái trong bộ nhớ tạm (Dry-run)  │
         └──────────────────────┬──────────────────────────────────────┘
                                │
                                ▼
         ┌─────────────────────────────────────────────────────────────┐
         │           StateCommitment (Merkle Tree Root)                │
         │  1. Sắp xếp từ điển các key-value pairs (Canonical sort)   │
-        │  2. Tính toán SHA-256 Merkle / Trie State Hash              │
-        │  3. Đối chiếu: state_hash_computed == header.state_hash     │
+        │  2. Mã hóa nhị phân chuẩn hóa qua encode_canonical()       │
+        │  3. Phân định miền RFC 6962 (0x00 leaf, 0x01 internal)     │
+        │  4. Đối chiếu: state_hash_computed == header.state_hash     │
         └──────────────────────┬──────────────────────────────────────┘
                                │
                                ▼
@@ -50,35 +52,39 @@ Tầng Execution đóng vai trò là hạt nhân xử lý logic nghiệp vụ v�
 
 ### 2.1. Quản lý Trạng thái & Cơ chế Chống Tấn công (StateEngine)
 Tệp `src/execution/state.py` hiện thực lớp `StateEngine` tuân thủ giao thức `StateProtocol`:
-1. **Kiểm soát quyền sở hữu khóa (Key Ownership Rule):**
+1. **Xác thực chữ ký số (Signature Verification - Mục 7 Lab01):**
+   - Hỗ trợ tiêm phụ thuộc `CryptoProtocol` và bảng khóa công khai `pub_keys`.
+   - Nếu tài khoản gửi đã đăng ký khóa công khai, giao dịch bắt buộc phải có chữ ký hợp lệ dưới ngữ cảnh `TX:<chain_id>` trước khi được thực thi.
+2. **Kiểm soát quyền sở hữu khóa (Key Ownership Rule):**
    - Người gửi chỉ có quyền ghi/sửa/xóa các khóa bắt đầu bằng tiền tố `<Sender_ID>/` (ví dụ: Alice chỉ được ghi khóa `Alice/balance`, không thể can thiệp vào `Bob/balance`).
-   - Mọi nỗ lực can thiệp khóa ngoài phạm vi sở hữu sẽ lập tức ném ngoại lệ `PermissionError` và loại bỏ giao dịch.
-2. **Cơ chế Chống Phát lại (Replay Protection):**
-   - Theo dõi bộ băm giao dịch đã thực thi (`executed_tx_hashes: set[str]`) và bảng ánh xạ số thứ tự nonces (`account_nonces: dict[str, int]`).
-   - Giao dịch có cùng `tx_id` hoặc nonce không tăng tiến đơn điệu đều bị từ chối với ngoại lệ `ReplayTransactionError`.
-3. **Thực thi Đơn định & Cô lập Bộ nhớ (Dry-run Isolation):**
-   - Phương thức `validate_and_compute_hash(txs)` thực hiện sao chép trạng thái (snapshot copy), áp dụng danh sách giao dịch trên bản sao để tính `state_hash` mà không làm thay đổi trạng thái cam kết hiện tại nếu block chưa đạt được sự đồng thuận 2/3+ (PoLC / Quorum).
+   - Mọi nỗ lực can thiệp khóa ngoài phạm vi sở hữu sẽ bị từ chối (`return False`).
+3. **Cơ chế Chống Phát lại (Replay Protection):**
+   - Theo dõi bộ băm giao dịch đã thực thi (`executed_tx_hashes: set[bytes]`) và bảng ánh xạ số thứ tự nonces (`account_nonces: dict[str, int]`).
+   - Giao dịch có cùng `tx_id` hoặc nonce không tăng tiến đơn điệu đều bị từ chối.
+4. **Thực thi Đơn định & Cô lập Bộ nhớ (Dry-run Isolation):**
+   - Phương thức `validate_and_compute_hash(txs)` thực hiện sao chép trạng thái (`clone()`), áp dụng danh sách giao dịch trên bản sao để tính `state_hash` mà không làm thay đổi trạng thái cam kết hiện tại nếu block chưa đạt được sự đồng thuận 2/3+ (PoLC / Quorum).
 
 ### 2.2. Tính toán State Commitment (Merkle Tree Hash)
 Tệp `src/execution/commitment.py` hiện thực thuật toán băm cam kết trạng thái:
-- Mọi cặp khóa-giá trị trong trạng thái được chuẩn hóa qua thuật toán Canonical Serialization (sắp xếp khóa theo thứ tự từ điển UTF-8 để triệt tiêu tính bất định).
-- Tính toán lá Merkle bằng cách kết hợp `SHA-256(canonical_key || ":" || canonical_value)`.
+- Mọi cặp khóa-giá trị trong trạng thái được chuẩn hóa qua thuật toán Canonical Serialization từ `src/common/serializer.py` (sắp xếp khóa theo thứ tự từ điển UTF-8 để triệt tiêu tính bất định).
+- Tính toán lá Merkle bằng cách kết hợp `SHA-256(0x00 || encode_canonical(k, v))`.
+- Áp dụng chuẩn phân định miền RFC 6962: gắn tiền tố `0x00` cho lá và `0x01` cho nút nhánh nội bộ để triệt tiêu lỗ hổng duplicate-leaf (CVE-2012-2459).
 - Hai node độc lập nhận cùng danh sách giao dịch hợp lệ đảm bảo sinh ra cùng một chuỗi byte `state_hash` với xác suất xung đột xấp xỉ bằng $0$.
 
 ### 2.3. Quản lý Sổ cái Cục bộ (Ledger)
 Tệp `src/execution/ledger.py` hiện thực lớp `Ledger` tuân thủ `LedgerProtocol`:
-- Quản lý danh sách các khối đã được đồng thuận `finalized_chain: list[Block]`.
-- Khởi tạo khối nguyên thủy Genesis Block tại chiều cao `height = 0` với `parent_hash = "0"*64`.
-- Quản lý trạng thái pending và finalized. Cung cấp API `commit_block(block)` chỉ ghi nhận khối khi cả `parent_hash` và `state_hash` đều khớp với kết quả thẩm định từ `StateEngine`.
+- Quản lý danh sách các khối đã được đồng thuận `finalized_chain: list[tuple[BlockHeader, BlockBody]]`.
+- Khởi tạo khối nguyên thủy Genesis Block tại chiều cao `height = 0` với `parent_hash = b"\x00"*32`.
+- Quản lý trạng thái pending và finalized. Cung cấp API `validate_block(header, body, state)` kiểm tra toàn diện trước khi commit.
 
 ---
 
 ## 3. Kết quả Kiểm thử & Đo kiểm Thực nghiệm
 
-Toàn bộ mã nguồn TV2 được kiểm thử độc lập thông qua script `run_tv2_tests.py`. Kết quả chạy thực tế:
+Toàn bộ mã nguồn TV2 được kiểm thử độc lập thông qua script `run_tv2_tests.py` và tích hợp chung qua `pytest`. Kết quả chạy thực tế:
 
 ```text
-Ran 12 tests in 0.003s
+Ran 12 tests in 0.010s
 OK (100% SUCCESS RATE)
 ```
 
@@ -95,13 +101,3 @@ OK (100% SUCCESS RATE)
 | **UT-09** | `test_valid_block_accepted` | Khối hợp lệ được commit thành công và cập nhật `state_root`. | **PASSED** |
 | **E2E-T1** | `test_t1_state_convergence` | Mô phỏng 8 nodes mạng nhận tập giao dịch phân tán, đạt trạng thái hội tụ 100%. | **PASSED** |
 | **E2E-T2** | `test_t2_duplicate_reordered` | Xử lý mạng chập chờn: Gói tin trùng lặp hoặc đảo thứ tự không bị thực thi 2 lần. | **PASSED** |
-| **E2E-T3** | `test_protocol_contract` | Kiểm tra toàn vẹn kiểu dữ liệu đầu ra và khả năng cắm nối với Consensus Engine. | **PASSED** |
-
----
-
-## 4. Giao diện Đấu nối với TV1 (Crypto) & TV3 (Consensus/Network)
-
-Tầng Execution của TV2 đã sẵn sàng 100% để tích hợp hệ thống:
-1. **Đầu vào từ TV1 (Crypto):** Nhận đối tượng `Transaction` chứa chữ ký Ed25519 đã xác thực và hàm băm Canonical.
-2. **Đầu vào từ TV3/TV4 (Consensus Node):** Khi Consensus đề xuất `Block`, gọi `ledger.validate_block(block, state_engine)`.
-3. **Đầu ra ghi sổ:** Trả về mã lỗi hoặc xác nhận `commit_block()`, cung cấp `state_hash` cho khối tiếp theo.
