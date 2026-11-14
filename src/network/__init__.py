@@ -1,5 +1,16 @@
-"""Deterministic network simulation and gossip components."""
+"""Deterministic network simulation, gossip protocol, and rate limiting components.
 
-from .simulator import NetworkSimulator
+Belongs to Thành viên 3 (TV3).
+"""
 
-__all__ = ["NetworkSimulator"]
+from .gossip import GossipManager
+from .rate_limiter import RateLimiter, RateLimiterConfig
+from .simulator import NetworkConfig, NetworkSimulator
+
+__all__ = [
+    "NetworkSimulator",
+    "NetworkConfig",
+    "RateLimiter",
+    "RateLimiterConfig",
+    "GossipManager",
+]
