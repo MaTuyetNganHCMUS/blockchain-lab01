@@ -25,20 +25,21 @@ if TYPE_CHECKING:
     from src.common.interfaces import CryptoProtocol
 
 
+from src.common.serializer import encode_canonical
+
+
 VoteStep = tuple[int, int, str]
 
 
 def vote_signing_bytes(vote: Vote) -> bytes:
-    """Return a stable signature payload containing every unsigned vote field."""
-
-    document = {
-        "block_hash": vote.block_hash.hex(),
-        "height": vote.height,
-        "phase": vote.phase,
-        "round": vote.round,
-        "voter": vote.voter,
-    }
-    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    """Return a deterministic canonical signature payload for an unsigned vote."""
+    return encode_canonical((
+        vote.block_hash,
+        vote.height,
+        vote.phase,
+        vote.round,
+        vote.voter,
+    ))
 
 
 @dataclass(frozen=True)

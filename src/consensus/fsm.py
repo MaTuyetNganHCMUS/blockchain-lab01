@@ -401,14 +401,21 @@ class ConsensusFSM(ConsensusProtocol):
 
         existing = self.proposals.get((header.height, header.round))
         body = existing[1] if existing else None
+        hdr_hash = self._compute_header_hash(header)
+        if body is None:
+            cached_entry = self.block_cache.get(hdr_hash)
+            if cached_entry and cached_entry[1] is not None:
+                body = cached_entry[1]
+
         self.proposals[(header.height, header.round)] = (header, body)
+        if body is not None:
+            self.block_cache[hdr_hash] = (header, body)
 
         # If body is already present or empty, evaluate prevote
         if body is not None:
             self._evaluate_proposal_and_prevote(sim_time, header, body)
         else:
             # Request block body from proposer
-            hdr_hash = self._compute_header_hash(header)
             req_packet = pack_message(MSG_BODY_REQUEST, hdr_hash)
             self.network.send(self.node_id, header.proposer, req_packet)
 
@@ -422,6 +429,12 @@ class ConsensusFSM(ConsensusProtocol):
                 self.proposals[(self.height, self.round)] = (header, body)
                 self.block_cache[header_hash] = (header, body)
                 self._evaluate_proposal_and_prevote(sim_time, header, body)
+        else:
+            # Cache body if it arrives before matching header
+            header = existing[0] if existing else None
+            self.proposals[(self.height, self.round)] = (header, body)
+            if body.header_hash:
+                self.block_cache[body.header_hash] = (header, body)
 
     def _evaluate_proposal_and_prevote(
         self,
@@ -710,7 +723,12 @@ class ConsensusFSM(ConsensusProtocol):
     # PACKET DISPATCHER
     # ==========================================================================
 
-    def on_packet(self, sim_time: float | int, packet_bytes: bytes) -> None:
+    def on_packet(
+        self,
+        sim_time: float | int,
+        packet_bytes: bytes,
+        sender: str = "",
+    ) -> None:
         """Process incoming wire packet."""
         try:
             msg_type, payload = unpack_message(packet_bytes)
@@ -730,10 +748,13 @@ class ConsensusFSM(ConsensusProtocol):
             cached = self.block_cache.get(payload)
             if cached:
                 reply = pack_message(MSG_BODY, cached[1])
-                # Broadcast or send back to requestor
-                for peer in self.validators:
-                    if peer != self.node_id:
-                        self.network.send(self.node_id, peer, reply)
+                target = sender if sender and sender in self.validators else None
+                if target and target != self.node_id:
+                    self.network.send(self.node_id, target, reply)
+                else:
+                    for peer in self.validators:
+                        if peer != self.node_id:
+                            self.network.send(self.node_id, peer, reply)
 
 
 __all__ = ["ConsensusFSM"]

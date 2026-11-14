@@ -213,7 +213,12 @@ class MockConsensus:
         self.received_packets: list[tuple[float | int, bytes]] = []
         self.received_timeouts: list[tuple[float | int, int, int, str]] = []
 
-    def on_packet(self, sim_time: float | int, packet_bytes: bytes) -> None:
+    def on_packet(
+        self,
+        sim_time: float | int,
+        packet_bytes: bytes,
+        sender: str = "",
+    ) -> None:
         """Record received packet at simulation timestamp."""
         self.received_packets.append((sim_time, packet_bytes))
 

@@ -120,7 +120,6 @@ class ValidatorNode:
         from ..security.locking import LockManager, VoteTracker
 
         crypto = Ed25519Crypto()
-        state = StateEngine(initial_data=initial_state)
         ledger = Ledger(with_genesis=True)
 
         resolved_pub_keys = dict(pub_keys) if pub_keys is not None else {}
@@ -128,6 +127,13 @@ class ValidatorNode:
         if resolved_priv_key is None:
             resolved_priv_key, derived_pub = crypto.generate_keypair()
             resolved_pub_keys.setdefault(node_id, derived_pub)
+
+        state = StateEngine(
+            initial_data=initial_state,
+            crypto=crypto,
+            pub_keys=resolved_pub_keys,
+            chain_id=chain_id,
+        )
 
         vote_tracker = VoteTracker(
             validators=validators,
@@ -221,9 +227,14 @@ class ValidatorNode:
         self.fsm.mempool.append(tx)
         return True
 
-    def handle_packet(self, sim_time: float | int, packet_bytes: bytes) -> None:
+    def handle_packet(
+        self,
+        sim_time: float | int,
+        packet_bytes: bytes,
+        sender: str = "",
+    ) -> None:
         """Route packet to consensus state machine."""
-        self.fsm.on_packet(sim_time, packet_bytes)
+        self.fsm.on_packet(sim_time, packet_bytes, sender=sender)
 
     def handle_timeout(
         self,
