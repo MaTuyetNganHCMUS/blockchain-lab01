@@ -63,27 +63,28 @@ Hệ thống sử dụng riêng biệt một thể hiện `self.rng = random.Ran
 Đề bài Lab 01 yêu cầu mạng vận hành theo mô hình bán đồng bộ (*Partial Synchrony*). Hệ thống phân tách thời gian chạy thành hai kỷ nguyên rõ rệt:
 
 ```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> PRE_GST: Khởi chạy mô phỏng (t = 0)
-    
-    state PRE_GST {
+flowchart LR
+    Start([Khởi chạy mô phỏng t = 0]) --> PRE_GST
+
+    subgraph PRE_GST ["Giai đoạn 1: Pre-GST (t < T_GST) - Mạng Nhiễu Loạn"]
         direction TB
-        Loss["Xác suất rớt gói: drop_rate > 0 (EVENT_DROP)"]
-        Jitter["Độ trễ biến thiên: delay in [min_delay, max_delay]"]
-        Dup["Xác suất nhân bản: dup_rate > 0"]
-    }
-    
-    PRE_GST --> POST_GST: Trục thời gian vượt mốc t >= T_GST
-    
-    state POST_GST {
+        P1["Xác suất rớt gói: drop_rate > 0 (EVENT_DROP)"]
+        P2["Độ trễ biến thiên lớn: delay in [min_delay, max_delay]"]
+        P3["Xác suất nhân bản gói: dup_rate > 0"]
+        P4["Mục tiêu: Bảo đảm SAFETY (Không rẽ nhánh)"]
+    end
+
+    PRE_GST -->|Trục thời gian vượt mốc t >= T_GST| POST_GST
+
+    subgraph POST_GST ["Giai đoạn 2: Post-GST (t >= T_GST) - Mạng Ổn Định"]
         direction TB
-        NoLoss["Không rớt gói: drop_rate = 0"]
-        BoundedDelay["Độ trễ chặn trên nghiêm ngặt: delay <= Delta"]
-        Reliable["Chuyển giao tin cậy tuyệt đối"]
-    }
-    
-    POST_GST --> [*]
+        Q1["Tỷ lệ rớt gói: drop_rate = 0 (Không còn rớt gói)"]
+        Q2["Độ trễ có chặn trên nghiêm ngặt: delay <= Delta"]
+        Q3["Chuyển giao tin cậy tuyệt đối giữa các node trung thực"]
+        Q4["Mục tiêu: Phục hồi LIVENESS (Chốt khối liên tục)"]
+    end
+
+    POST_GST --> End([Hoàn tất Finalize khối])
 ```
 
 #### 3.1. Đặc tả Toán học Cơ chế Truyền Gói
