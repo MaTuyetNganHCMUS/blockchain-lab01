@@ -12,6 +12,7 @@ from ..common.interfaces import (
     GENESIS_PARENT_HASH,
     BlockBody,
     BlockHeader,
+    BlockPolicy,
     StateProtocol,
 )
 from ..crypto.ed25519 import verify
@@ -22,6 +23,7 @@ from .commitment import (
     compute_tx_root,
     header_signing_payload,
 )
+from .mempool import body_wire_size
 
 
 def create_genesis_block() -> tuple[BlockHeader, BlockBody]:
@@ -54,6 +56,7 @@ class Ledger:
         public_keys: Mapping[str, bytes] | None = None,
         chain_id: str = "lab01",
         crypto: Any = None,
+        block_policy: BlockPolicy | None = None,
     ) -> None:
         self._finalized_chain: list[tuple[BlockHeader, BlockBody]] = []
         self._pending_blocks: dict[bytes, tuple[BlockHeader, BlockBody]] = {}
@@ -64,6 +67,7 @@ class Ledger:
         )
         self.chain_id: str = chain_id
         self._crypto: Any = crypto
+        self.block_policy: BlockPolicy = block_policy if block_policy is not None else BlockPolicy()
 
         if with_genesis:
             genesis_header, genesis_body = create_genesis_block()
@@ -147,6 +151,19 @@ class Ledger:
         expected_header_hash = compute_header_hash(header)
         if body.header_hash and body.header_hash != expected_header_hash:
             return False, "Body header_hash does not match computed header hash"
+
+        # 1b. Block Capacity Limits (BlockPolicy)
+        if len(body.transactions) > self.block_policy.max_txs:
+            return False, (
+                f"Oversized block: {len(body.transactions)} transactions exceeds "
+                f"max_txs={self.block_policy.max_txs}"
+            )
+        wire_bytes = body_wire_size(body)
+        if wire_bytes > self.block_policy.max_bytes:
+            return False, (
+                f"Oversized block: {wire_bytes} bytes exceeds "
+                f"max_bytes={self.block_policy.max_bytes}"
+            )
 
         # 2. Parent Hash
         expected_parent = self.get_latest_hash()

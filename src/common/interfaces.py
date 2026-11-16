@@ -45,6 +45,7 @@ STEP_COMMIT: str = "COMMIT"
 
 # Network Message Types
 MSG_HEADER: str = "HEADER"
+MSG_HEADER_REQUEST: str = "HEADER_REQUEST"
 MSG_BODY: str = "BODY"
 MSG_BODY_REQUEST: str = "BODY_REQUEST"
 MSG_VOTE: str = "VOTE"
@@ -61,6 +62,44 @@ EVENT_PREVOTE: str = "PREVOTE"
 EVENT_PRECOMMIT: str = "PRECOMMIT"
 EVENT_LOCK: str = "LOCK"
 EVENT_FINALIZE: str = "FINALIZE"
+EVENT_REJECT_TX: str = "REJECT_TX"
+EVENT_REJECT_HEADER: str = "REJECT_HEADER"
+EVENT_REJECT_VOTE: str = "REJECT_VOTE"
+EVENT_REJECT_BODY: str = "REJECT_BODY"
+EVENT_REJECT_PACKET: str = "REJECT_PACKET"
+
+# Deterministic Rejection Reason Codes
+REASON_INVALID_SIGNATURE: str = "INVALID_SIGNATURE"
+REASON_WRONG_DOMAIN: str = "WRONG_DOMAIN"
+REASON_UNKNOWN_SENDER: str = "UNKNOWN_SENDER"
+REASON_WRONG_PROPOSER: str = "WRONG_PROPOSER"
+REASON_WRONG_HEIGHT: str = "WRONG_HEIGHT"
+REASON_WRONG_ROUND: str = "WRONG_ROUND"
+REASON_MALFORMED_PACKET: str = "MALFORMED_PACKET"
+REASON_UNACCEPTED_HEADER: str = "UNACCEPTED_HEADER"
+REASON_TX_BAD_SIGNATURE: str = "TX_BAD_SIGNATURE"
+REASON_TX_UNAUTHORIZED_KEY: str = "TX_UNAUTHORIZED_KEY"
+REASON_TX_DUPLICATE: str = "TX_DUPLICATE"
+REASON_TX_NONCE_INVALID: str = "TX_NONCE_INVALID"
+REASON_TX_TOO_LARGE: str = "TX_TOO_LARGE"
+REASON_MEMPOOL_FULL: str = "MEMPOOL_FULL"
+REASON_OVERSIZED_BLOCK: str = "OVERSIZED_BLOCK"
+REASON_INVALID_BLOCK: str = "INVALID_BLOCK"
+REASON_EQUIVOCATION: str = "EQUIVOCATION"
+
+
+@dataclass(frozen=True)
+class BlockPolicy:
+    """Shared block capacity limits enforced by proposers and validators."""
+
+    max_txs: int = 100
+    max_bytes: int = 262_144
+
+    def __post_init__(self) -> None:
+        if self.max_txs <= 0:
+            raise ValueError("BlockPolicy.max_txs must be positive")
+        if self.max_bytes <= 0:
+            raise ValueError("BlockPolicy.max_bytes must be positive")
 
 
 # ==============================================================================

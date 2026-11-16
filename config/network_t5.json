@@ -1,8 +1,8 @@
 {
   "scenario": "T5_partial_synchrony",
   "chain_id": "lab01-t5-partial-sync",
-  "validator_count": 8,
-  "byzantine_count": 2,
+  "validator_count": 10,
+  "byzantine_count": 3,
   "random_seed": 777,
   "network": {
     "gst": 25.0,

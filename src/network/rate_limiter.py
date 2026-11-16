@@ -55,6 +55,7 @@ class RateLimiter:
         self._peer_timestamps: dict[str, list[float]] = {}
         # Blocked peers: peer_id -> unblock_timestamp
         self._blocked_peers: dict[str, float] = {}
+        self._blocked_heights: dict[str, int] = {}
 
         # Outbound tracking: sender_id -> list of send timestamps
         self._outbound_timestamps: dict[str, list[float]] = {}
@@ -73,6 +74,7 @@ class RateLimiter:
         if current_time >= unblock_time:
             # Block expired -> unblock
             del self._blocked_peers[key]
+            blocked_height = self._blocked_heights.pop(key, 0)
             # Reset history
             self._peer_timestamps.pop(key, None)
             if self.logger is not None:
@@ -81,7 +83,7 @@ class RateLimiter:
                     sim_time=current_time,
                     node_id=peer_id,
                     event_type=EVENT_UNBLOCK,
-                    height=0,
+                    height=blocked_height,
                     round=0,
                     detail=f"Peer {peer_id} unblocked{target_desc} after penalty duration",
                 )
@@ -120,6 +122,7 @@ class RateLimiter:
             # Exceeded rate limit -> block peer
             unblock_at = current_time + self.config.block_duration
             self._blocked_peers[key] = unblock_at
+            self._blocked_heights[key] = max(0, height)
             if self.logger is not None:
                 target_desc = f" at {receiver_id}" if receiver_id else ""
                 self.logger.log(
@@ -184,6 +187,7 @@ class RateLimiter:
         """Reset all rate limiter state."""
         self._peer_timestamps.clear()
         self._blocked_peers.clear()
+        self._blocked_heights.clear()
         self._outbound_timestamps.clear()
 
 

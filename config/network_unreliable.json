@@ -1,6 +1,6 @@
 {
   "chain_id": "lab01-unreliable",
-  "validator_count": 8,
+  "validator_count": 10,
   "random_seed": 1042,
   "network": {
     "gst": 30.0,

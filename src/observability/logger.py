@@ -19,6 +19,11 @@ from src.common.interfaces import (
     EVENT_PRECOMMIT,
     EVENT_PREVOTE,
     EVENT_PROPOSE,
+    EVENT_REJECT_BODY,
+    EVENT_REJECT_HEADER,
+    EVENT_REJECT_PACKET,
+    EVENT_REJECT_TX,
+    EVENT_REJECT_VOTE,
     EVENT_SEND,
     EVENT_UNBLOCK,
 )
@@ -35,6 +40,11 @@ EVENT_TYPES = frozenset(
         EVENT_PRECOMMIT,
         EVENT_LOCK,
         EVENT_FINALIZE,
+        EVENT_REJECT_TX,
+        EVENT_REJECT_HEADER,
+        EVENT_REJECT_VOTE,
+        EVENT_REJECT_BODY,
+        EVENT_REJECT_PACKET,
     }
 )
 
