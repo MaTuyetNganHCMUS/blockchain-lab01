@@ -279,7 +279,12 @@ class NetworkProtocol(Protocol):
 class ConsensusProtocol(Protocol):
     """TV4 Contract: BFT Consensus Finite State Machine event handlers."""
 
-    def on_packet(self, sim_time: float | int, packet_bytes: bytes) -> None:
+    def on_packet(
+        self,
+        sim_time: float | int,
+        packet_bytes: bytes,
+        sender: str = "",
+    ) -> None:
         """Process incoming network packet at current simulation time."""
         ...
 

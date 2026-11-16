@@ -242,9 +242,14 @@ class ValidatorNode:
         if hasattr(self.state, "register_participant"):
             self.state.register_participant(sender, public_key)
 
-    def handle_packet(self, sim_time: float | int, packet_bytes: bytes) -> None:
+    def handle_packet(
+        self,
+        sim_time: float | int,
+        packet_bytes: bytes,
+        sender: str = "",
+    ) -> None:
         """Route packet to consensus state machine."""
-        self.fsm.on_packet(sim_time, packet_bytes)
+        self.fsm.on_packet(sim_time, packet_bytes, sender=sender)
 
     def handle_timeout(
         self,

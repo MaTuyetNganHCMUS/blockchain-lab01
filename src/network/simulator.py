@@ -288,9 +288,15 @@ class NetworkSimulator(NetworkProtocol):
 
         # Duck-typing dispatch to receiver
         if hasattr(receiver_node, "handle_packet"):
-            receiver_node.handle_packet(self.current_time, packet.payload)
+            try:
+                receiver_node.handle_packet(self.current_time, packet.payload, sender=packet.sender)
+            except TypeError:
+                receiver_node.handle_packet(self.current_time, packet.payload)
         elif hasattr(receiver_node, "on_packet"):
-            receiver_node.on_packet(self.current_time, packet.payload)
+            try:
+                receiver_node.on_packet(self.current_time, packet.payload, sender=packet.sender)
+            except TypeError:
+                receiver_node.on_packet(self.current_time, packet.payload)
         elif callable(receiver_node):
             receiver_node(self.current_time, packet)
 
