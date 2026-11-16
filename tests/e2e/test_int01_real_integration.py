@@ -10,6 +10,11 @@ Verifies end-to-end integration across all five team modules on ``main``:
 
 from __future__ import annotations
 
+import hashlib
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from src.common.interfaces import (
     CryptoProtocol,
     LedgerProtocol,
@@ -23,11 +28,33 @@ from src.common.interfaces import (
     VoteTrackerProtocol,
 )
 from src.consensus.node import ValidatorNode
-from src.crypto import Ed25519Crypto, ValidatorIdentity, ValidatorKeyRegistry
-from src.execution import Ledger, StateEngine, compute_header_hash
+from src.crypto import Ed25519Crypto, ValidatorIdentity, ValidatorKeyRegistry, sign
+from src.execution import Ledger, StateEngine, compute_header_hash, tx_signing_payload
 from src.network import NetworkConfig, NetworkSimulator, RateLimiter, RateLimiterConfig
 from src.observability import DeterministicLogger
 from src.security import LockManager, VoteTracker
+
+
+def _derive_participant_keypair(name: str) -> tuple[bytes, bytes]:
+    seed = hashlib.sha256(f"int01_participant:{name}".encode()).digest()
+    priv = Ed25519PrivateKey.from_private_bytes(seed)
+    priv_bytes = priv.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
+    )
+    pub_bytes = priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return priv_bytes, pub_bytes
+
+
+PARTICIPANTS = {name: _derive_participant_keypair(name) for name in ("Alice", "Bob", "Mallory")}
+
+
+def _make_signed_tx(sender: str, key: str, value: str, nonce: int, chain_id: str = "lab01") -> Transaction:
+    priv, _ = PARTICIPANTS[sender]
+    u = Transaction(sender=sender, key=key, value=value, nonce=nonce)
+    sig = sign(priv, f"TX:{chain_id}", tx_signing_payload(u))
+    return Transaction(sender=sender, key=key, value=value, nonce=nonce, sig=sig)
 
 
 def _build_full_integrated_cluster(
@@ -66,6 +93,8 @@ def _build_full_integrated_cluster(
 
     registry = ValidatorKeyRegistry(tuple(identities))
     pub_keys = {val: registry.get_public_key(val) for val in validators}
+    for name, (_, pub) in PARTICIPANTS.items():
+        pub_keys[name] = pub
 
     nodes: dict[str, ValidatorNode] = {}
     for val in active_ids or validators:
@@ -115,9 +144,9 @@ def test_integrated_5of5_multi_height_consensus_with_network_simulator() -> None
     )
     nodes, sim, shared_logger = _build_full_integrated_cluster(validators, network_config=cfg)
 
-    tx_alice_1 = Transaction("Alice", "Alice/balance", "100", 1, b"sig_a1")
-    tx_bob_1 = Transaction("Bob", "Bob/balance", "50", 1, b"sig_b1")
-    tx_invalid = Transaction("Mallory", "Alice/balance", "9999", 1, b"bad_owner")
+    tx_alice_1 = _make_signed_tx("Alice", "Alice/balance", "100", 1)
+    tx_bob_1 = _make_signed_tx("Bob", "Bob/balance", "50", 1)
+    tx_invalid = _make_signed_tx("Mallory", "Alice/balance", "9999", 1)
 
     for node in nodes.values():
         node.submit_transaction(tx_alice_1)
@@ -176,7 +205,7 @@ def test_integrated_5of5_partial_synchrony_timeout_and_round_change() -> None:
         network_config=cfg,
     )
 
-    tx = Transaction("Alice", "Alice/msg", "recovered_via_tv3", 1, b"sig")
+    tx = _make_signed_tx("Alice", "Alice/msg", "recovered_via_tv3", 1)
     for val in honest:
         nodes[val].submit_transaction(tx)
         nodes[val].start(sim_time=0.0)
@@ -200,6 +229,8 @@ def test_integrated_5of5_deterministic_replay_same_seed() -> None:
     crypto = Ed25519Crypto()
     keypairs = {val: crypto.generate_keypair() for val in validators}
     pub_keys = {val: keypairs[val][1] for val in validators}
+    for name, (_, pub) in PARTICIPANTS.items():
+        pub_keys[name] = pub
     cfg = NetworkConfig(
         gst=1.0,
         delta=0.15,
@@ -231,7 +262,7 @@ def test_integrated_5of5_deterministic_replay_same_seed() -> None:
             )
             for val in validators
         }
-        tx = Transaction("Alice", "Alice/counter", "42", 1, b"s1")
+        tx = _make_signed_tx("Alice", "Alice/counter", "42", 1)
         for node in nodes.values():
             node.submit_transaction(tx)
             node.start(sim_time=0.0)

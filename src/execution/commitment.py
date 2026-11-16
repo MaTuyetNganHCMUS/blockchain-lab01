@@ -18,10 +18,37 @@ def sha256(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
 
 
+def tx_signing_payload(tx: Transaction) -> bytes:
+    """Compute canonical deterministic signing payload of a Transaction under TX:<chain_id>."""
+    return encode_canonical(
+        {
+            "sender": tx.sender,
+            "key": tx.key,
+            "value": tx.value,
+            "nonce": tx.nonce,
+        }
+    )
+
+
 def compute_tx_hash(tx: Transaction) -> bytes:
     """Compute deterministic SHA-256 hash of a Transaction using canonical encoding."""
-    raw = encode_canonical((tx.sender, tx.key, tx.value, tx.nonce))
-    return sha256(raw)
+    return sha256(tx_signing_payload(tx))
+
+
+def header_signing_payload(header: BlockHeader) -> bytes:
+    """Compute canonical deterministic signing payload of a BlockHeader under HEADER:<chain_id>."""
+    from ..common.interfaces import BlockHeader
+
+    raw = BlockHeader(
+        height=header.height,
+        round=header.round,
+        parent_hash=header.parent_hash,
+        state_hash=header.state_hash,
+        tx_root=header.tx_root,
+        proposer=header.proposer,
+        sig=b"",
+    )
+    return encode_canonical(raw)
 
 
 def compute_header_hash(header: BlockHeader) -> bytes:
@@ -94,5 +121,7 @@ __all__ = [
     "compute_state_commitment",
     "compute_tx_hash",
     "compute_tx_root",
+    "header_signing_payload",
     "sha256",
+    "tx_signing_payload",
 ]
