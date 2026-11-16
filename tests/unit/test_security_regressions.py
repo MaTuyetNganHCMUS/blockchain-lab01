@@ -7,7 +7,7 @@ import pytest
 
 from src.common.interfaces import BlockBody, BlockHeader, Transaction
 from src.common.serializer import encode_canonical
-from src.crypto import generate_keypair, sign, verify
+from src.crypto import generate_keypair, sign
 from src.execution import (
     Ledger,
     StateEngine,

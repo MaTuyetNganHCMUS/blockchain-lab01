@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..common.interfaces import DOMAIN_TX, BlockBody, BlockHeader, Transaction
+from ..common.interfaces import DOMAIN_TX, BlockBody, Transaction
 from ..crypto.ed25519 import verify
 from .commitment import compute_state_commitment, compute_tx_hash, tx_signing_payload
 
