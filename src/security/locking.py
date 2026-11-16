@@ -31,6 +31,30 @@ from src.common.serializer import encode_canonical
 VoteStep = tuple[int, int, str]
 
 
+def validate_bft_validator_set(
+    validators: Sequence[str],
+    quorum_threshold: int | None = None,
+) -> tuple[int, int]:
+    """Validate that ``validators`` satisfies ``n = 3f + 1`` (n >= 4) and safe quorum ``>= 2f + 1``."""
+    normalized = tuple(validators)
+    if not normalized or len(set(normalized)) != len(normalized):
+        raise ValueError("validators must be non-empty and unique")
+    n = len(normalized)
+    if n < 4 or (n - 1) % 3 != 0:
+        raise ValueError(
+            f"validator count n={n} must satisfy n = 3f + 1 with n >= 4 (e.g., 4, 7, 10)"
+        )
+    f = (n - 1) // 3
+    min_quorum = 2 * f + 1
+    quorum = min_quorum if quorum_threshold is None else quorum_threshold
+    if not min_quorum <= quorum <= n:
+        raise ValueError(
+            f"quorum_threshold={quorum} violates BFT safety for n={n}, f={f} "
+            f"(must satisfy {min_quorum} <= quorum <= {n})"
+        )
+    return f, quorum
+
+
 def vote_signing_bytes(vote: Vote) -> bytes:
     """Return a deterministic canonical signature payload for an unsigned vote."""
     return encode_canonical((
@@ -91,20 +115,17 @@ class VoteTracker:
             raise ValueError("validator_count does not match validators")
 
         normalized = tuple(validators)
-        if not normalized or len(set(normalized)) != len(normalized):
-            raise ValueError("validators must be non-empty and unique")
         if not chain_id:
             raise ValueError("chain_id must not be empty")
         if expected_height is not None and expected_height <= 0:
             raise ValueError("expected_height must be positive")
 
+        f, resolved_quorum = validate_bft_validator_set(normalized, quorum_threshold)
         self.validators = normalized
         self._validator_set = frozenset(normalized)
         self.validator_count = len(normalized)
-        self.f = (self.validator_count - 1) // 3
-        self.quorum = quorum_threshold if quorum_threshold is not None else 2 * self.f + 1
-        if not 1 <= self.quorum <= self.validator_count:
-            raise ValueError("quorum_threshold must be within the validator set")
+        self.f = f
+        self.quorum = resolved_quorum
 
         self.chain_id = chain_id
         self.expected_height = expected_height
@@ -358,5 +379,6 @@ __all__ = [
     "LockManager",
     "RejectedVote",
     "VoteTracker",
+    "validate_bft_validator_set",
     "vote_signing_bytes",
 ]

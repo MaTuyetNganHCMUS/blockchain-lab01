@@ -14,6 +14,7 @@ Implements the network layer conforming to NetworkProtocol and Section 6:
 from __future__ import annotations
 
 import heapq
+import json
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -101,10 +102,44 @@ class NetworkSimulator(NetworkProtocol):
     # NetworkProtocol Implementation
     # --------------------------------------------------------------------------
 
+    def _extract_packet_metadata(
+        self,
+        raw_bytes: bytes,
+        fallback_type: str,
+        sender: str,
+        receiver: str,
+    ) -> tuple[str, int]:
+        """Extract wire msg_type and height for deterministic network event logs."""
+        msg_type = fallback_type
+        height = 0
+        if raw_bytes.startswith(b"{"):
+            try:
+                envelope = json.loads(raw_bytes.decode("utf-8"))
+                if isinstance(envelope, dict):
+                    raw_type = envelope.get("msg_type")
+                    if isinstance(raw_type, str) and raw_type:
+                        msg_type = raw_type
+                    inner = envelope.get("data")
+                    if isinstance(inner, dict):
+                        raw_height = inner.get("height")
+                        if isinstance(raw_height, int) and raw_height >= 0:
+                            height = raw_height
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                pass
+        if height == 0:
+            for node_id in (sender, receiver):
+                node = self._nodes.get(node_id)
+                node_height = getattr(node, "height", None)
+                if isinstance(node_height, int) and node_height > 0:
+                    height = node_height
+                    break
+        return msg_type, height
+
     def send(self, sender: str, receiver: str, raw_bytes: bytes) -> None:
         """Enqueue point-to-point packet into simulated network queue."""
+        msg_type, _ = self._extract_packet_metadata(raw_bytes, "RAW", sender, receiver)
         packet = NetPacket(
-            msg_type="RAW",
+            msg_type=msg_type,
             sender=sender,
             receiver=receiver,
             payload=raw_bytes,
@@ -151,6 +186,12 @@ class NetworkSimulator(NetworkProtocol):
     def _enqueue_packet(self, packet: NetPacket) -> None:
         """Apply network simulation model (partial synchrony) and push to queue."""
         self.total_sent += 1
+        _, pkt_height = self._extract_packet_metadata(
+            packet.payload,
+            packet.msg_type,
+            packet.sender,
+            packet.receiver,
+        )
 
         # Check sender outbound rate limit
         if self.rate_limiter is not None:
@@ -162,7 +203,7 @@ class NetworkSimulator(NetworkProtocol):
                         sim_time=self.current_time,
                         node_id=packet.sender,
                         event_type=EVENT_DROP,
-                        height=0,
+                        height=pkt_height,
                         round=0,
                         detail=f"Outbound rate exceeded for {packet.sender}, packet dropped",
                     )
@@ -180,7 +221,7 @@ class NetworkSimulator(NetworkProtocol):
                         sim_time=self.current_time,
                         node_id=packet.sender,
                         event_type=EVENT_DROP,
-                        height=0,
+                        height=pkt_height,
                         round=0,
                         detail=f"Pre-GST loss: packet from {packet.sender} to {packet.receiver} dropped",
                     )
@@ -193,15 +234,20 @@ class NetworkSimulator(NetworkProtocol):
             if self.config.dup_rate_pre_gst > 0.0 and self.rng.random() < self.config.dup_rate_pre_gst:
                 self.total_duplicates += 1
                 dup_delay = delay + self.rng.uniform(0.01, 0.5)
-                self._schedule_packet_delivery(packet, dup_delay)
+                self._schedule_packet_delivery(packet, dup_delay, pkt_height)
         else:
             # Post-GST: Guaranteed delivery within Delta
             max_delay = max(self.config.min_delay, self.config.delta)
             delay = self.rng.uniform(self.config.min_delay, max_delay)
 
-        self._schedule_packet_delivery(packet, delay)
+        self._schedule_packet_delivery(packet, delay, pkt_height)
 
-    def _schedule_packet_delivery(self, packet: NetPacket, delay: float) -> None:
+    def _schedule_packet_delivery(
+        self,
+        packet: NetPacket,
+        delay: float,
+        height: int = 0,
+    ) -> None:
         """Schedule a packet delivery event at current_time + delay."""
         delivery_time = self.current_time + delay
         self._seq += 1
@@ -211,7 +257,7 @@ class NetworkSimulator(NetworkProtocol):
                 sim_time=self.current_time,
                 node_id=packet.sender,
                 event_type=EVENT_SEND,
-                height=0,
+                height=height,
                 round=0,
                 detail=f"Send {packet.msg_type} to {packet.receiver} (eta={delivery_time:.3f})",
             )
@@ -220,7 +266,7 @@ class NetworkSimulator(NetworkProtocol):
                     sim_time=self.current_time,
                     node_id=packet.receiver,
                     event_type=EVENT_DELAY,
-                    height=0,
+                    height=height,
                     round=0,
                     detail=f"Latency jitter {delay:.3f}s from {packet.sender}",
                 )
@@ -262,11 +308,18 @@ class NetworkSimulator(NetworkProtocol):
 
     def _dispatch_packet(self, packet: NetPacket) -> None:
         """Deliver packet to target node or handler."""
+        _, pkt_height = self._extract_packet_metadata(
+            packet.payload,
+            packet.msg_type,
+            packet.sender,
+            packet.receiver,
+        )
         # Verify receiver inbound rate limiter
         if self.rate_limiter is not None:
             if not self.rate_limiter.check_inbound(
                 packet.sender,
                 self.current_time,
+                height=pkt_height,
                 receiver_id=packet.receiver,
             ):
                 self.total_dropped += 1
@@ -275,7 +328,7 @@ class NetworkSimulator(NetworkProtocol):
                         sim_time=self.current_time,
                         node_id=packet.receiver,
                         event_type=EVENT_DROP,
-                        height=0,
+                        height=pkt_height,
                         round=0,
                         detail=f"Dropped packet from blocked peer {packet.sender}",
                     )

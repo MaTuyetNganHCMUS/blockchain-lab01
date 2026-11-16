@@ -10,13 +10,14 @@ import json
 from typing import Any
 
 from ..common.interfaces import (
-    BlockBody,
-    BlockHeader,
     MSG_BODY,
     MSG_BODY_REQUEST,
     MSG_HEADER,
+    MSG_HEADER_REQUEST,
     MSG_TX,
     MSG_VOTE,
+    BlockBody,
+    BlockHeader,
     Transaction,
     Vote,
 )
@@ -123,7 +124,9 @@ def pack_message(msg_type: str, data: Any) -> bytes:
         envelope["data"] = vote_to_dict(data)
     elif msg_type == MSG_TX and isinstance(data, Transaction):
         envelope["data"] = tx_to_dict(data)
-    elif msg_type == MSG_BODY_REQUEST and isinstance(data, (bytes, bytearray)):
+    elif msg_type in (MSG_BODY_REQUEST, MSG_HEADER_REQUEST) and isinstance(
+        data, (bytes, bytearray)
+    ):
         envelope["data"] = bytes(data).hex()
     elif isinstance(data, dict):
         envelope["data"] = data
@@ -140,7 +143,7 @@ def unpack_message(payload_bytes: bytes) -> tuple[str, Any]:
     raw_data = envelope.get("data")
 
     if not isinstance(raw_data, dict):
-        if msg_type == MSG_BODY_REQUEST and isinstance(raw_data, str):
+        if msg_type in (MSG_BODY_REQUEST, MSG_HEADER_REQUEST) and isinstance(raw_data, str):
             return msg_type, bytes.fromhex(raw_data)
         return msg_type, raw_data
 

@@ -53,7 +53,7 @@ class MiniNetwork:
         for sender, receiver, payload in current_queue:
             target_node = self.nodes.get(receiver)
             if target_node is not None:
-                target_node.handle_packet(sim_time, payload)
+                target_node.handle_packet(sim_time, payload, sender=sender)
                 count += 1
         return count
 
@@ -149,8 +149,9 @@ def test_t6_proposer_crashed_round_timeout_and_recovery() -> None:
     # --------------------------------------------------------------------------
     assert nodes["node0"].fsm.get_proposer(1, 1) == "node2"
 
-    # Router delivers proposal header and body from node2 to node0 and node3
-    router.deliver_all(sim_time=2.3)
+    # Router delivers Header -> BodyRequest -> Body (3-hop pull flow) from node2 to node0 and node3
+    for _ in range(3):
+        router.deliver_all(sim_time=2.3)
 
     # All honest nodes should now have prevoted for the proposed block
     for val in ["node0", "node2", "node3"]:

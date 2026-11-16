@@ -1,7 +1,17 @@
 {
   "chain_id": "lab01",
-  "validator_count": 8,
+  "validator_count": 10,
   "random_seed": 42,
+  "mempool": {
+    "max_txs": 1000,
+    "max_bytes": 1048576,
+    "max_tx_bytes": 16384,
+    "future_nonce_window": 64
+  },
+  "block": {
+    "max_txs": 100,
+    "max_bytes": 262144
+  },
   "network": {
     "gst": 100,
     "delta": 10

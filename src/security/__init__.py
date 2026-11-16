@@ -12,6 +12,7 @@ from .locking import (
     LockManager,
     RejectedVote,
     VoteTracker,
+    validate_bft_validator_set,
     vote_signing_bytes,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "RejectedVote",
     "ReplayBatch",
     "VoteTracker",
+    "validate_bft_validator_set",
     "vote_signing_bytes",
 ]

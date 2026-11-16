@@ -20,10 +20,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..common.interfaces import (
-    BlockBody,
-    BlockHeader,
-    ConsensusProtocol,
-    CryptoProtocol,
     DOMAIN_HEADER,
     DOMAIN_VOTE,
     EVENT_FINALIZE,
@@ -31,24 +27,45 @@ from ..common.interfaces import (
     EVENT_PRECOMMIT,
     EVENT_PREVOTE,
     EVENT_PROPOSE,
+    EVENT_REJECT_BODY,
+    EVENT_REJECT_HEADER,
+    EVENT_REJECT_PACKET,
+    EVENT_REJECT_TX,
+    EVENT_REJECT_VOTE,
     GENESIS_PARENT_HASH,
-    LedgerProtocol,
-    LockManagerProtocol,
-    LoggerProtocol,
     MSG_BODY,
     MSG_BODY_REQUEST,
     MSG_HEADER,
+    MSG_HEADER_REQUEST,
     MSG_TX,
     MSG_VOTE,
-    NetworkProtocol,
     NIL_BLOCK_HASH,
     PHASE_PRECOMMIT,
     PHASE_PREVOTE,
+    REASON_EQUIVOCATION,
+    REASON_INVALID_BLOCK,
+    REASON_INVALID_SIGNATURE,
+    REASON_MALFORMED_PACKET,
+    REASON_OVERSIZED_BLOCK,
+    REASON_UNACCEPTED_HEADER,
+    REASON_UNKNOWN_SENDER,
+    REASON_WRONG_HEIGHT,
+    REASON_WRONG_PROPOSER,
+    REASON_WRONG_ROUND,
     STEP_COMMIT,
     STEP_NEW_ROUND,
     STEP_PRECOMMIT,
     STEP_PREVOTE,
     STEP_PROPOSE,
+    BlockBody,
+    BlockHeader,
+    BlockPolicy,
+    ConsensusProtocol,
+    CryptoProtocol,
+    LedgerProtocol,
+    LockManagerProtocol,
+    LoggerProtocol,
+    NetworkProtocol,
     StateProtocol,
     Transaction,
     Vote,
@@ -64,6 +81,7 @@ from ..common.mocks import (
     MockState,
     MockVoteTracker,
 )
+from ..execution.mempool import AdmissionResult, Mempool, MempoolConfig, body_wire_size
 from .codec import pack_message, unpack_message
 
 
@@ -88,6 +106,9 @@ class ConsensusFSM(ConsensusProtocol):
         timeout_prevote: float = 1.0,
         timeout_precommit: float = 1.0,
         timeout_delta: float = 0.5,
+        mempool_config: MempoolConfig | None = None,
+        block_policy: BlockPolicy | None = None,
+        tx_gossip_fanout: int = 4,
     ) -> None:
         self.node_id = node_id
         self.validators = list(validators)
@@ -105,6 +126,25 @@ class ConsensusFSM(ConsensusProtocol):
         )
         self.lock_manager = lock_manager if lock_manager is not None else MockLockManager()
         self.logger = logger if logger is not None else MockLogger()
+
+        if not isinstance(self.vote_tracker, MockVoteTracker):
+            from ..security.locking import validate_bft_validator_set
+
+            _, required_quorum = validate_bft_validator_set(
+                self.validators,
+                getattr(self.vote_tracker, "quorum", None),
+            )
+            if not isinstance(self.lock_manager, MockLockManager):
+                lock_quorum = getattr(self.lock_manager, "quorum_threshold", None)
+                if lock_quorum is not None and lock_quorum < required_quorum:
+                    raise ValueError(
+                        f"LockManager quorum_threshold={lock_quorum} < required {required_quorum}"
+                    )
+
+        self.block_policy = block_policy if block_policy is not None else BlockPolicy()
+        if hasattr(self.ledger, "block_policy") and block_policy is not None:
+            self.ledger.block_policy = self.block_policy
+        self.tx_gossip_fanout = max(1, tx_gossip_fanout)
 
         # Keys
         if priv_key is not None:
@@ -146,7 +186,14 @@ class ConsensusFSM(ConsensusProtocol):
         self.valid_round: int = -1
 
         # Execution tracking & mempool
-        self.mempool: list[Transaction] = []
+        self.mempool = Mempool(config=mempool_config)
+        self.seen_tx_hashes: set[bytes] = set()
+        self.accepted_headers: set[bytes] = set()
+        self.headers_by_hash: dict[bytes, BlockHeader] = {}
+        self.header_sources: dict[bytes, str] = {}
+        self.quorum_peers: dict[bytes, list[str]] = {}
+        self.requested_headers: set[bytes] = set()
+        self.requested_bodies: dict[bytes, int] = {}
         self.prevoted_rounds: set[tuple[int, int]] = set()      # Rule 1
         self.precommitted_rounds: set[tuple[int, int]] = set()  # Rule 2
         self.round_advanced: set[tuple[int, int]] = set()
@@ -159,6 +206,7 @@ class ConsensusFSM(ConsensusProtocol):
         self.unlinked_bodies: dict[bytes, BlockBody] = {}
         self.future_headers: dict[int, list[BlockHeader]] = {}
         self.future_votes: dict[int, list[Vote]] = {}
+        self.future_round_votes: dict[tuple[int, int], list[Vote]] = {}
 
     # ==========================================================================
     # PROPOSER & TIMEOUT HELPERS
@@ -185,15 +233,100 @@ class ConsensusFSM(ConsensusProtocol):
         sim_time: float | int,
         event_type: str,
         detail: str,
+        *,
+        height: int | None = None,
+        round: int | None = None,
     ) -> None:
         """Log consensus events while respecting strict logger schemas (TV5)."""
         if event_type == "NEW_ROUND" and getattr(self.logger, "strict_event_types", False):
             return
+        log_h = self.height if height is None else max(0, height)
+        log_r = self.round if round is None else max(0, round)
         try:
-            self.logger.log(sim_time, self.node_id, event_type, self.height, self.round, detail)
+            self.logger.log(sim_time, self.node_id, event_type, log_h, log_r, detail)
         except ValueError:
             if event_type != "NEW_ROUND":
                 raise
+
+    def _log_reject(
+        self,
+        sim_time: float | int,
+        event_type: str,
+        reason_code: str,
+        *,
+        msg_type: str,
+        detail_extra: str = "",
+        height: int | None = None,
+        round: int | None = None,
+    ) -> None:
+        """Emit structured deterministic rejection log entry for T3/auditability."""
+        detail = f"reason={reason_code} msg={msg_type}"
+        if detail_extra:
+            detail = f"{detail} {detail_extra}"
+        self._safe_log(sim_time, event_type, detail, height=height, round=round)
+
+    # ==========================================================================
+    # TRANSACTION ADMISSION & BOUNDED GOSSIP
+    # ==========================================================================
+
+    def admit_transaction(
+        self,
+        tx: Transaction,
+        *,
+        source: str = "local",
+        sim_time: float | int = 0.0,
+        sender: str = "",
+    ) -> AdmissionResult:
+        """Unified transaction admission path for local submissions and MSG_TX."""
+        result = self.mempool.admit(tx, state=self.state, sim_time=float(sim_time))
+        if not result.accepted:
+            tx_tag = result.tx_hash.hex()[:16] if result.tx_hash else "none"
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_TX,
+                result.reason_code,
+                msg_type=MSG_TX,
+                detail_extra=f"source={source} tx={tx_tag}",
+            )
+            return result
+
+        if result.tx_hash not in self.seen_tx_hashes:
+            self.seen_tx_hashes.add(result.tx_hash)
+            self._gossip_transaction(tx, result.tx_hash, exclude_peer=sender)
+        return result
+
+    def _gossip_transaction(
+        self,
+        tx: Transaction,
+        tx_hash: bytes,
+        *,
+        exclude_peer: str = "",
+    ) -> None:
+        """Relay newly admitted transaction with bounded deterministic fan-out."""
+        if not self.validators:
+            return
+        candidates: list[str] = []
+        # Prioritize current and next proposers so TX reaches block builder in 1 hop.
+        for r_offset in (0, 1):
+            proposer = self.get_proposer(self.height, self.round + r_offset)
+            if proposer not in (self.node_id, exclude_peer) and proposer not in candidates:
+                candidates.append(proposer)
+
+        n = len(self.validators)
+        my_idx = self.validators.index(self.node_id) if self.node_id in self.validators else 0
+        offset = int.from_bytes(tx_hash[:2], "big") % n if tx_hash else 0
+        for step in range(1, n + 1):
+            if len(candidates) >= self.tx_gossip_fanout:
+                break
+            peer = self.validators[(my_idx + offset + step) % n]
+            if peer not in (self.node_id, exclude_peer) and peer not in candidates:
+                candidates.append(peer)
+
+        if not candidates:
+            return
+        packed_tx = pack_message(MSG_TX, tx)
+        for peer in candidates:
+            self.network.send(self.node_id, peer, packed_tx)
 
     def _expected_parent_hash(self) -> bytes:
         """Resolve expected parent hash compatible with MockLedger and TV2 Ledger."""
@@ -222,21 +355,8 @@ class ConsensusFSM(ConsensusProtocol):
         return self.crypto.hash_bytes(self.crypto.encode_canonical(header))
 
     def _select_valid_mempool_txs(self) -> tuple[tuple[Transaction, ...], bytes]:
-        """Select valid mempool transactions and compute resulting candidate state hash."""
-        candidate = tuple(self.mempool)
-        ok, state_hash = self.state.validate_and_compute_hash(candidate)
-        if ok:
-            return candidate, state_hash
-
-        accepted: list[Transaction] = []
-        for tx in candidate:
-            trial = tuple(accepted + [tx])
-            tx_ok, _ = self.state.validate_and_compute_hash(trial)
-            if tx_ok:
-                accepted.append(tx)
-        final_txs = tuple(accepted)
-        _, final_hash = self.state.validate_and_compute_hash(final_txs)
-        return final_txs, final_hash
+        """Select valid mempool transactions bounded by ``self.block_policy``."""
+        return self.mempool.select_candidates(self.state, self.block_policy)
 
     def _vote_signing_payload(self, unsigned_vote: Vote) -> bytes:
         """Compute signing payload aligned with MockVoteTracker or TV5 VoteTracker."""
@@ -260,6 +380,11 @@ class ConsensusFSM(ConsensusProtocol):
         self.valid_round = -1
         self.round_advanced.clear()
         self.pending_commits.clear()
+        self.requested_headers.clear()
+        self.requested_bodies.clear()
+        self.future_round_votes = {
+            k: v for k, v in self.future_round_votes.items() if k[0] >= height
+        }
         if hasattr(self.vote_tracker, "set_expected_height"):
             self.vote_tracker.set_expected_height(height)
         if hasattr(self.lock_manager, "start_height"):
@@ -299,6 +424,18 @@ class ConsensusFSM(ConsensusProtocol):
             self._propose_block(sim_time)
         else:
             self.step = STEP_PROPOSE
+            existing = self.proposals.get((self.height, round))
+            if existing is not None and existing[0] is not None:
+                hdr, body = existing
+                if body is not None:
+                    self._evaluate_proposal_and_prevote(sim_time, hdr, body)
+                else:
+                    self._request_block_body(hdr, self._compute_header_hash(hdr))
+
+        for buffered_vote in self.future_round_votes.pop((self.height, round), []):
+            if self.height != buffered_vote.height or self.round != round:
+                break
+            self.on_vote(sim_time, buffered_vote)
 
     # ==========================================================================
     # PROPOSAL CREATION & BROADCAST
@@ -353,7 +490,9 @@ class ConsensusFSM(ConsensusProtocol):
         header_hash = self._compute_header_hash(signed_header)
         body = BlockBody(header_hash=header_hash, transactions=txs)
 
-        # Cache locally
+        # Cache locally (Header-before-Body: only broadcast Header; peers pull Body via MSG_BODY_REQUEST)
+        self.accepted_headers.add(header_hash)
+        self.headers_by_hash[header_hash] = signed_header
         self.block_cache[header_hash] = (signed_header, body)
         self.proposals[(self.height, self.round)] = (signed_header, body)
 
@@ -366,14 +505,9 @@ class ConsensusFSM(ConsensusProtocol):
             f"hash={header_hash.hex()[:16]} txs={len(txs)}",
         )
 
-        # Broadcast Header and Body
+        # Broadcast Header only (Phase 1 of Header-before-Body protocol)
         packed_hdr = pack_message(MSG_HEADER, signed_header)
         self.network.broadcast_header(self.node_id, packed_hdr)
-
-        packed_body = pack_message(MSG_BODY, body)
-        for peer in self.validators:
-            if peer != self.node_id:
-                self.network.send(self.node_id, peer, packed_body)
 
         # Locally evaluate own proposal
         self._evaluate_proposal_and_prevote(sim_time, signed_header, body)
@@ -382,26 +516,83 @@ class ConsensusFSM(ConsensusProtocol):
     # PROPOSAL HANDLING & PREVOTING
     # ==========================================================================
 
-    def on_proposal_header(self, sim_time: float | int, header: BlockHeader) -> None:
+    def _schedule_body_retry(self, height: int, round_num: int) -> None:
+        delay = min(0.5, max(0.05, self.timeout_propose / 2.0))
+        self.network.schedule_timeout(
+            self.node_id,
+            delay,
+            f"{height}:{round_num}:BODY_RETRY",
+        )
+
+    def _request_block_body(self, header: BlockHeader, header_hash: bytes) -> None:
+        attempts = self.requested_bodies.get(header_hash, 0)
+        if attempts >= 8:
+            return
+        self.requested_bodies[header_hash] = attempts + 1
+        req_packet = pack_message(MSG_BODY_REQUEST, header_hash)
+        target = header.proposer
+        if attempts > 0:
+            peers = [p for p in self.quorum_peers.get(header_hash, []) if p != self.node_id]
+            alt = self.header_sources.get(header_hash)
+            if alt and alt != self.node_id and alt not in peers:
+                peers.insert(0, alt)
+            if peers:
+                target = peers[(attempts - 1) % len(peers)]
+        if target and target != self.node_id:
+            self.network.send(self.node_id, target, req_packet)
+        if attempts == 0:
+            self._schedule_body_retry(header.height, header.round)
+
+    def on_proposal_header(
+        self,
+        sim_time: float | int,
+        header: BlockHeader,
+        sender: str = "",
+    ) -> None:
         """Process incoming proposed BlockHeader."""
         if header.height > self.height:
             self.future_headers.setdefault(header.height, []).append(header)
             return
         if header.height < self.height:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_HEADER,
+                REASON_WRONG_HEIGHT,
+                msg_type=MSG_HEADER,
+                detail_extra=f"got_h={header.height}",
+            )
             return
 
         expected_proposer = self.get_proposer(header.height, header.round)
         if header.proposer != expected_proposer:
-            # Reject proposal from non-designated proposer
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_HEADER,
+                REASON_WRONG_PROPOSER,
+                msg_type=MSG_HEADER,
+                detail_extra=f"proposer={header.proposer} expected={expected_proposer}",
+            )
             return
 
         # Check signature under HEADER:<chain_id>
         pub_key = self.pub_keys.get(header.proposer)
         if pub_key is None:
-            # Reject proposal from proposer without registered public key
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_HEADER,
+                REASON_UNKNOWN_SENDER,
+                msg_type=MSG_HEADER,
+                detail_extra=f"proposer={header.proposer}",
+            )
             return
         if not header.sig:
-            # Reject proposal without signature
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_HEADER,
+                REASON_INVALID_SIGNATURE,
+                msg_type=MSG_HEADER,
+                detail_extra=f"proposer={header.proposer} empty_sig",
+            )
             return
 
         from ..execution.commitment import header_signing_payload
@@ -413,16 +604,36 @@ class ConsensusFSM(ConsensusProtocol):
             canonical_bytes,
             header.sig,
         ):
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_HEADER,
+                REASON_INVALID_SIGNATURE,
+                msg_type=MSG_HEADER,
+                detail_extra=f"proposer={header.proposer}",
+            )
             return
 
         header_hash = self._compute_header_hash(header)
+        if header.round < self.round and header_hash not in self.pending_commits:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_HEADER,
+                REASON_WRONG_ROUND,
+                msg_type=MSG_HEADER,
+                detail_extra=f"got_r={header.round}",
+            )
+            return
+
+        self.accepted_headers.add(header_hash)
+        self.headers_by_hash[header_hash] = header
+        if sender and sender != self.node_id and sender in self.validators:
+            self.header_sources[header_hash] = sender
+
         existing = self.proposals.get((header.height, header.round))
-        header_hash = self._compute_header_hash(header)
-        existing = self.proposals.get((header.height, header.round))
-        body = existing[1] if (existing and existing[1] is not None) else self.unlinked_bodies.pop(header_hash, None)
+        body = existing[1] if (existing and existing[1] is not None) else None
         if body is None:
             cached_entry = self.block_cache.get(header_hash)
-            if cached_entry and cached_entry[1] is not None:
+            if cached_entry and cached_entry[0] is not None and cached_entry[1] is not None:
                 body = cached_entry[1]
 
         self.proposals[(header.height, header.round)] = (header, body)
@@ -434,38 +645,83 @@ class ConsensusFSM(ConsensusProtocol):
             elif header.round == self.round:
                 self._evaluate_proposal_and_prevote(sim_time, header, body)
         else:
-            # Request block body from proposer
-            req_packet = pack_message(MSG_BODY_REQUEST, header_hash)
-            self.network.send(self.node_id, header.proposer, req_packet)
+            # Phase 2: Request block body only after header acceptance
+            self._request_block_body(header, header_hash)
 
     def on_proposal_body(self, sim_time: float | int, body: BlockBody) -> None:
-        """Process incoming BlockBody."""
-        existing = self.proposals.get((self.height, self.round))
-        matched_round = None
-        if existing and existing[0] and self._compute_header_hash(existing[0]) == body.header_hash:
-            matched_round = self.round
-            header = existing[0]
-        else:
+        """Process incoming BlockBody only if its matching header was already accepted."""
+        if body.header_hash not in self.accepted_headers:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_BODY,
+                REASON_UNACCEPTED_HEADER,
+                msg_type=MSG_BODY,
+                detail_extra=f"hash={body.header_hash.hex()[:16]}",
+            )
+            return
+
+        header = self.headers_by_hash.get(body.header_hash)
+        matched_round: int | None = header.round if header is not None else None
+        if header is None:
             for (h, r), prop in self.proposals.items():
                 if h == self.height and prop[0] and self._compute_header_hash(prop[0]) == body.header_hash:
                     matched_round = r
                     header = prop[0]
                     break
-            else:
-                header = None
 
-        if header is not None:
-            header_hash = self._compute_header_hash(header)
-            self.proposals[(self.height, matched_round)] = (header, body)
-            self.block_cache[header_hash] = (header, body)
-            if header_hash in self.pending_commits:
-                self._finalize_block(sim_time, header_hash)
-            elif matched_round == self.round:
-                self._evaluate_proposal_and_prevote(sim_time, header, body)
-        else:
-            self.unlinked_bodies[body.header_hash] = body
-            if body.header_hash:
-                self.block_cache[body.header_hash] = (None, body)
+        if header is None or matched_round is None:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_BODY,
+                REASON_UNACCEPTED_HEADER,
+                msg_type=MSG_BODY,
+                detail_extra=f"hash={body.header_hash.hex()[:16]}",
+            )
+            return
+
+        if len(body.transactions) > self.block_policy.max_txs or (
+            body_wire_size(body) > self.block_policy.max_bytes
+        ):
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_BODY,
+                REASON_OVERSIZED_BLOCK,
+                msg_type=MSG_BODY,
+                detail_extra=f"hash={body.header_hash.hex()[:16]} txs={len(body.transactions)}",
+            )
+            if matched_round == self.round and (self.height, self.round) not in self.prevoted_rounds:
+                self.step = STEP_PREVOTE
+                self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
+                self._schedule_prevote_timeout()
+            return
+
+        header_hash = self._compute_header_hash(header)
+        self.requested_bodies.pop(header_hash, None)
+        self.proposals[(header.height, matched_round)] = (header, body)
+        self.block_cache[header_hash] = (header, body)
+        if header_hash in self.pending_commits:
+            self._finalize_block(sim_time, header_hash)
+        elif matched_round == self.round:
+            self._evaluate_proposal_and_prevote(sim_time, header, body)
+
+    def _is_reproposed_locked_block(self, header: BlockHeader, body: BlockBody | None) -> bool:
+        """Return True if ``header`` re-proposes the identical content of ``self.locked_block``."""
+        if self.locked_block is None:
+            return False
+        cached = self.block_cache.get(self.locked_block)
+        if cached is None or cached[0] is None:
+            return False
+        locked_hdr, locked_body = cached
+        if (
+            header.height != locked_hdr.height
+            or header.parent_hash != locked_hdr.parent_hash
+            or header.state_hash != locked_hdr.state_hash
+            or header.tx_root != locked_hdr.tx_root
+        ):
+            return False
+        if body is not None and locked_body is not None:
+            return body.transactions == locked_body.transactions
+        return True
 
     def _evaluate_proposal_and_prevote(
         self,
@@ -484,8 +740,15 @@ class ConsensusFSM(ConsensusProtocol):
 
         # 1 & 2. Validate Block (TV2 full ledger validation when available)
         if body is not None and hasattr(self.ledger, "validate_block"):
-            is_valid_block, _ = self.ledger.validate_block(header, body, self.state)
+            is_valid_block, reason = self.ledger.validate_block(header, body, self.state)
             if not is_valid_block:
+                self._log_reject(
+                    sim_time,
+                    EVENT_REJECT_BODY,
+                    REASON_INVALID_BLOCK,
+                    msg_type=MSG_BODY,
+                    detail_extra=f"hash={header_hash.hex()[:16]} detail={reason}",
+                )
                 self.step = STEP_PREVOTE
                 self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
                 self._schedule_prevote_timeout()
@@ -493,6 +756,13 @@ class ConsensusFSM(ConsensusProtocol):
         else:
             expected_parent = self._expected_parent_hash()
             if header.parent_hash != expected_parent:
+                self._log_reject(
+                    sim_time,
+                    EVENT_REJECT_HEADER,
+                    REASON_INVALID_BLOCK,
+                    msg_type=MSG_HEADER,
+                    detail_extra=f"hash={header_hash.hex()[:16]} parent_mismatch",
+                )
                 self.step = STEP_PREVOTE
                 self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
                 self._schedule_prevote_timeout()
@@ -503,17 +773,27 @@ class ConsensusFSM(ConsensusProtocol):
                     body.transactions
                 )
                 if not valid_txs or computed_state_hash != header.state_hash:
+                    self._log_reject(
+                        sim_time,
+                        EVENT_REJECT_BODY,
+                        REASON_INVALID_BLOCK,
+                        msg_type=MSG_BODY,
+                        detail_extra=f"hash={header_hash.hex()[:16]} state_mismatch",
+                    )
                     self.step = STEP_PREVOTE
                     self.cast_vote(sim_time, PHASE_PREVOTE, NIL_BLOCK_HASH)
                     self._schedule_prevote_timeout()
                     return
 
         # 3. Check Locking Rules (Rule 4, 5)
-        can_prevote = self.lock_manager.can_prevote(
-            header_hash,
-            self.round,
-            polka_round=self.valid_round,
-        )
+        if self._is_reproposed_locked_block(header, body):
+            can_prevote = True
+        else:
+            can_prevote = self.lock_manager.can_prevote(
+                header_hash,
+                self.round,
+                polka_round=self.valid_round,
+            )
 
         vote_hash = header_hash if can_prevote else NIL_BLOCK_HASH
         self.step = STEP_PREVOTE
@@ -530,9 +810,17 @@ class ConsensusFSM(ConsensusProtocol):
     def cast_vote(self, sim_time: float | int, phase: str, block_hash: bytes) -> Vote:
         """Create, sign, record, and broadcast a PREVOTE or PRECOMMIT."""
         if phase == PHASE_PREVOTE:
+            if (self.height, self.round) in self.prevoted_rounds:
+                for prev in reversed(self.votes_cast):
+                    if prev.height == self.height and prev.round == self.round and prev.phase == phase:
+                        return prev
             self.prevoted_rounds.add((self.height, self.round))  # Rule 1
             event_type = EVENT_PREVOTE
         else:
+            if (self.height, self.round) in self.precommitted_rounds:
+                for prev in reversed(self.votes_cast):
+                    if prev.height == self.height and prev.round == self.round and prev.phase == phase:
+                        return prev
             self.precommitted_rounds.add((self.height, self.round))  # Rule 2
             event_type = EVENT_PRECOMMIT
 
@@ -580,17 +868,75 @@ class ConsensusFSM(ConsensusProtocol):
         self._handle_quorum_result(sim_time, phase, quorum_res)
         return signed_vote
 
+    @staticmethod
+    def _map_vote_rejection_reason(reason: str) -> str:
+        lower = reason.lower()
+        if "equivocation" in lower:
+            return REASON_EQUIVOCATION
+        if "unknown validator" in lower:
+            return REASON_UNKNOWN_SENDER
+        if "height" in lower:
+            return REASON_WRONG_HEIGHT
+        if "round" in lower:
+            return REASON_WRONG_ROUND
+        return REASON_INVALID_SIGNATURE
+
     def on_vote(self, sim_time: float | int, vote: Vote) -> None:
         """Process incoming Vote packet."""
+        if vote.voter not in self.validators:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_VOTE,
+                REASON_UNKNOWN_SENDER,
+                msg_type=MSG_VOTE,
+                detail_extra=f"voter={vote.voter}",
+            )
+            return
         if vote.height > self.height:
             self.future_votes.setdefault(vote.height, []).append(vote)
             return
-        if vote.height < self.height or vote.round != self.round:
+        if vote.height < self.height:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_VOTE,
+                REASON_WRONG_HEIGHT,
+                msg_type=MSG_VOTE,
+                detail_extra=f"voter={vote.voter} got_h={vote.height}",
+            )
+            return
+        if vote.round < self.round:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_VOTE,
+                REASON_WRONG_ROUND,
+                msg_type=MSG_VOTE,
+                detail_extra=f"voter={vote.voter} got_r={vote.round}",
+            )
             return
 
-        # Check signature if public key is known and signature is provided
+        # Check signature when public key is known and either signature is provided
+        # or signature verification is strictly required by VoteTracker.
         pub_key = self.pub_keys.get(vote.voter)
-        if pub_key is not None and vote.sig:
+        require_sigs = getattr(self.vote_tracker, "require_signatures", False)
+        if pub_key is None and require_sigs:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_VOTE,
+                REASON_UNKNOWN_SENDER,
+                msg_type=MSG_VOTE,
+                detail_extra=f"voter={vote.voter} missing_pubkey",
+            )
+            return
+        if pub_key is not None and (vote.sig or require_sigs):
+            if not vote.sig:
+                self._log_reject(
+                    sim_time,
+                    EVENT_REJECT_VOTE,
+                    REASON_INVALID_SIGNATURE,
+                    msg_type=MSG_VOTE,
+                    detail_extra=f"voter={vote.voter} empty_sig",
+                )
+                return
             unsigned = Vote(
                 height=vote.height,
                 round=vote.round,
@@ -605,9 +951,31 @@ class ConsensusFSM(ConsensusProtocol):
                 vote_payload,
                 vote.sig,
             ):
+                self._log_reject(
+                    sim_time,
+                    EVENT_REJECT_VOTE,
+                    REASON_INVALID_SIGNATURE,
+                    msg_type=MSG_VOTE,
+                    detail_extra=f"voter={vote.voter}",
+                )
                 return
 
+        if vote.round > self.round:
+            self.future_round_votes.setdefault((vote.height, vote.round), []).append(vote)
+            return
+
+        prev_rej = len(getattr(self.vote_tracker, "rejected_votes", ()))
         quorum_res = self.vote_tracker.add_vote(vote)
+        after_rej = getattr(self.vote_tracker, "rejected_votes", ())
+        if len(after_rej) > prev_rej:
+            mapped_reason = self._map_vote_rejection_reason(after_rej[-1].reason)
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_VOTE,
+                mapped_reason,
+                msg_type=MSG_VOTE,
+                detail_extra=f"voter={vote.voter}",
+            )
         self._handle_quorum_result(sim_time, vote.phase, quorum_res)
 
     def _handle_quorum_result(self, sim_time: float | int, phase: str, quorum_res: Any) -> None:
@@ -620,6 +988,15 @@ class ConsensusFSM(ConsensusProtocol):
                 if hasattr(self.lock_manager, "observe_quorum"):
                     self.lock_manager.observe_quorum(quorum_res)
                 if quorum_res.block_hash != NIL_BLOCK_HASH:
+                    can_precommit = True
+                    if hasattr(self.lock_manager, "can_precommit"):
+                        can_precommit = self.lock_manager.can_precommit(
+                            quorum_res.block_hash,
+                            self.round,
+                            height=self.height,
+                        )
+                    if not can_precommit:
+                        return
                     # Polka on block B -> Lock on B (Rule 4)
                     self.locked_block = quorum_res.block_hash
                     self.locked_round = self.round
@@ -645,6 +1022,9 @@ class ConsensusFSM(ConsensusProtocol):
 
         elif phase == PHASE_PRECOMMIT:
             if quorum_res.block_hash != NIL_BLOCK_HASH:
+                peers = [v.voter for v in quorum_res.votes if v.voter != self.node_id]
+                if peers:
+                    self.quorum_peers[quorum_res.block_hash] = peers
                 self.pending_commits[quorum_res.block_hash] = (sim_time, self.height, self.round)
                 self._finalize_block(sim_time, quorum_res.block_hash)
             else:
@@ -686,17 +1066,26 @@ class ConsensusFSM(ConsensusProtocol):
         cached = self.block_cache.get(block_hash)
         if not cached:
             # Block data not yet available: do NOT finalize or construct placeholder.
-            # Request block body from proposer
-            proposer = self.get_proposer(self.height, self.round)
-            req_packet = pack_message(MSG_BODY_REQUEST, block_hash)
-            self.network.send(self.node_id, proposer, req_packet)
+            if block_hash not in self.accepted_headers:
+                if block_hash not in self.requested_headers:
+                    self.requested_headers.add(block_hash)
+                    req_hdr = pack_message(MSG_HEADER_REQUEST, block_hash)
+                    targets = list(self.quorum_peers.get(block_hash, [])[:2])
+                    proposer = self.get_proposer(self.height, self.round)
+                    if proposer != self.node_id and proposer not in targets:
+                        targets.append(proposer)
+                    for peer in targets:
+                        self.network.send(self.node_id, peer, req_hdr)
+                return False
+
+            hdr = self.headers_by_hash.get(block_hash)
+            if hdr is not None:
+                self._request_block_body(hdr, block_hash)
             return False
 
         header, body = cached
         if body is None:
-            proposer = self.get_proposer(self.height, self.round)
-            req_packet = pack_message(MSG_BODY_REQUEST, block_hash)
-            self.network.send(self.node_id, proposer, req_packet)
+            self._request_block_body(header, block_hash)
             return False
 
         is_valid, reason = self._validate_block_data(header, body)
@@ -718,8 +1107,7 @@ class ConsensusFSM(ConsensusProtocol):
         )
 
         # Clear executed transactions from mempool
-        executed_nonces = {(tx.sender, tx.nonce) for tx in body.transactions}
-        self.mempool = [tx for tx in self.mempool if (tx.sender, tx.nonce) not in executed_nonces]
+        self.mempool.remove_finalized(body.transactions, state=self.state)
 
         # Advance to next block height
         self.start_height(sim_time, self.height + 1)
@@ -746,6 +1134,14 @@ class ConsensusFSM(ConsensusProtocol):
             self.on_timeout_prevote(sim_time, height, round)
         elif step == STEP_PRECOMMIT:
             self.on_timeout_precommit(sim_time, height, round)
+        elif step == "BODY_RETRY":
+            prop = self.proposals.get((height, round))
+            if prop is not None and prop[0] is not None and prop[1] is None:
+                hdr = prop[0]
+                hdr_hash = self._compute_header_hash(hdr)
+                if self.requested_bodies.get(hdr_hash, 0) < 8:
+                    self._request_block_body(hdr, hdr_hash)
+                    self._schedule_body_retry(height, round)
 
     def on_timeout_propose(self, sim_time: float | int, height: int, round: int) -> None:
         """Handle proposal timeout (proposer crashed, silent, or slow)."""
@@ -800,33 +1196,49 @@ class ConsensusFSM(ConsensusProtocol):
         try:
             msg_type, payload = unpack_message(packet_bytes)
         except Exception:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_PACKET,
+                REASON_MALFORMED_PACKET,
+                msg_type="UNKNOWN",
+                detail_extra=f"sender={sender or 'unknown'}",
+            )
             return
 
         if msg_type == MSG_HEADER and isinstance(payload, BlockHeader):
-            self.on_proposal_header(sim_time, payload)
+            self.on_proposal_header(sim_time, payload, sender=sender)
         elif msg_type == MSG_BODY and isinstance(payload, BlockBody):
             self.on_proposal_body(sim_time, payload)
         elif msg_type == MSG_VOTE and isinstance(payload, Vote):
             self.on_vote(sim_time, payload)
         elif msg_type == MSG_TX and isinstance(payload, Transaction):
-            if hasattr(self.state, "verify_transaction_signature"):
-                if not self.state.verify_transaction_signature(payload):
-                    return
-            if not payload.key.startswith(f"{payload.sender}/"):
-                return
-            self.mempool.append(payload)
+            self.admit_transaction(
+                payload,
+                source="network",
+                sim_time=sim_time,
+                sender=sender,
+            )
+        elif msg_type == MSG_HEADER_REQUEST and isinstance(payload, bytes):
+            header = self.headers_by_hash.get(payload)
+            if header is None and payload in self.block_cache:
+                header = self.block_cache[payload][0]
+            if header is not None and sender and sender != self.node_id and sender in self.validators:
+                self.network.send(self.node_id, sender, pack_message(MSG_HEADER, header))
         elif msg_type == MSG_BODY_REQUEST and isinstance(payload, bytes):
-            # Reply with body if in block cache
+            # Reply directly to requester only if full block (header + body) is cached.
             cached = self.block_cache.get(payload)
-            if cached:
-                reply = pack_message(MSG_BODY, cached[1])
-                target = sender if sender and sender in self.validators else None
-                if target and target != self.node_id:
-                    self.network.send(self.node_id, target, reply)
-                else:
-                    for peer in self.validators:
-                        if peer != self.node_id:
-                            self.network.send(self.node_id, peer, reply)
+            if cached and cached[0] is not None and cached[1] is not None:
+                if sender and sender != self.node_id and sender in self.validators:
+                    reply = pack_message(MSG_BODY, cached[1])
+                    self.network.send(self.node_id, sender, reply)
+        else:
+            self._log_reject(
+                sim_time,
+                EVENT_REJECT_PACKET,
+                REASON_MALFORMED_PACKET,
+                msg_type=str(msg_type),
+                detail_extra=f"sender={sender or 'unknown'}",
+            )
 
 
 __all__ = ["ConsensusFSM"]

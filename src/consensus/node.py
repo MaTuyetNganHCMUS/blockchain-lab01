@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from ..common.interfaces import (
+    BlockPolicy,
     CryptoProtocol,
     LedgerProtocol,
     LockManagerProtocol,
@@ -31,6 +32,7 @@ from ..common.mocks import (
     MockState,
     MockVoteTracker,
 )
+from ..execution.mempool import AdmissionResult, MempoolConfig
 from .fsm import ConsensusFSM
 
 
@@ -54,6 +56,9 @@ class ValidatorNode:
         timeout_propose: float = 2.0,
         timeout_prevote: float = 1.0,
         timeout_precommit: float = 1.0,
+        mempool_config: MempoolConfig | None = None,
+        block_policy: BlockPolicy | None = None,
+        tx_gossip_fanout: int = 4,
     ) -> None:
         self.node_id = node_id
         self.validators = list(validators)
@@ -89,6 +94,9 @@ class ValidatorNode:
             timeout_propose=timeout_propose,
             timeout_prevote=timeout_prevote,
             timeout_precommit=timeout_precommit,
+            mempool_config=mempool_config,
+            block_policy=block_policy,
+            tx_gossip_fanout=tx_gossip_fanout,
         )
 
     @classmethod
@@ -106,6 +114,9 @@ class ValidatorNode:
         timeout_propose: float = 2.0,
         timeout_prevote: float = 1.0,
         timeout_precommit: float = 1.0,
+        mempool_config: MempoolConfig | None = None,
+        block_policy: BlockPolicy | None = None,
+        tx_gossip_fanout: int = 4,
     ) -> ValidatorNode:
         """Construct a ValidatorNode wired with all 5 real modules (TV1, TV2, TV3, TV4, TV5).
 
@@ -137,6 +148,7 @@ class ValidatorNode:
             public_keys=resolved_pub_keys,
             chain_id=chain_id,
             crypto=crypto,
+            block_policy=block_policy,
         )
 
         vote_tracker = VoteTracker(
@@ -174,6 +186,9 @@ class ValidatorNode:
             timeout_propose=timeout_propose,
             timeout_prevote=timeout_prevote,
             timeout_precommit=timeout_precommit,
+            mempool_config=mempool_config,
+            block_policy=block_policy,
+            tx_gossip_fanout=tx_gossip_fanout,
         )
         if hasattr(resolved_network, "register_node"):
             resolved_network.register_node(node_id, node)
@@ -226,15 +241,18 @@ class ValidatorNode:
         """Initialize the validator node at height 1, round 0."""
         self.fsm.start_height(sim_time, 1)
 
-    def submit_transaction(self, tx: Transaction) -> bool:
-        """Ingest a transaction into node's local mempool."""
-        if hasattr(self.state, "verify_transaction_signature"):
-            if not self.state.verify_transaction_signature(tx):
-                return False
-        if not tx.key.startswith(f"{tx.sender}/"):
-            return False
-        self.fsm.mempool.append(tx)
-        return True
+    def admit_transaction(
+        self,
+        tx: Transaction,
+        sim_time: float | int | None = None,
+    ) -> AdmissionResult:
+        """Ingest a transaction via the unified admission pipeline and return details."""
+        resolved_time = getattr(self.network, "current_time", 0.0) if sim_time is None else sim_time
+        return self.fsm.admit_transaction(tx, source="local", sim_time=resolved_time)
+
+    def submit_transaction(self, tx: Transaction, sim_time: float | int | None = None) -> bool:
+        """Ingest a transaction into node's local mempool and gossip on acceptance."""
+        return self.admit_transaction(tx, sim_time=sim_time).accepted
 
     def register_participant(self, sender: str, public_key: bytes) -> None:
         """Register a participant's public key for transaction validation."""
