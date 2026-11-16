@@ -8,7 +8,9 @@ from .commitment import (
     compute_state_commitment,
     compute_tx_hash,
     compute_tx_root,
+    header_signing_payload,
     sha256,
+    tx_signing_payload,
 )
 from .ledger import Ledger, create_genesis_block
 from .state import State, StateEngine
@@ -23,5 +25,7 @@ __all__ = [
     "compute_tx_hash",
     "compute_tx_root",
     "create_genesis_block",
+    "header_signing_payload",
     "sha256",
+    "tx_signing_payload",
 ]

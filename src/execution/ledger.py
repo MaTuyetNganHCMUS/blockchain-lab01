@@ -4,17 +4,23 @@ Owner: TV2 (Execution Engine & State Commitment)
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from ..common.interfaces import (
+    DOMAIN_HEADER,
     GENESIS_PARENT_HASH,
     BlockBody,
     BlockHeader,
     StateProtocol,
 )
+from ..crypto.ed25519 import verify
 from .commitment import (
     compute_header_hash,
     compute_state_commitment,
     compute_tx_hash,
     compute_tx_root,
+    header_signing_payload,
 )
 
 
@@ -42,15 +48,37 @@ class Ledger:
     2. Finalized Chain: Sequentially committed, immutable blocks.
     """
 
-    def __init__(self, with_genesis: bool = True) -> None:
+    def __init__(
+        self,
+        with_genesis: bool = True,
+        public_keys: Mapping[str, bytes] | None = None,
+        chain_id: str = "lab01",
+        crypto: Any = None,
+    ) -> None:
         self._finalized_chain: list[tuple[BlockHeader, BlockBody]] = []
         self._pending_blocks: dict[bytes, tuple[BlockHeader, BlockBody]] = {}
         self._blocks_by_height: dict[int, tuple[BlockHeader, BlockBody]] = {}
         self._blocks_by_hash: dict[bytes, tuple[BlockHeader, BlockBody]] = {}
+        self._public_keys: dict[str, bytes] = (
+            {k: bytes(v) for k, v in public_keys.items()} if public_keys else {}
+        )
+        self.chain_id: str = chain_id
+        self._crypto: Any = crypto
 
         if with_genesis:
             genesis_header, genesis_body = create_genesis_block()
             self.add_finalized_block(genesis_header, genesis_body)
+
+    def register_proposer(self, proposer: str, public_key: bytes) -> None:
+        """Register a proposer's public key for block header validation."""
+        if len(public_key) != 32:
+            raise ValueError("Ed25519 public key must be 32 bytes")
+        self._public_keys[proposer] = bytes(public_key)
+
+    def set_public_keys(self, keys: Mapping[str, bytes]) -> None:
+        """Update registered proposer public keys."""
+        for proposer, pub_key in keys.items():
+            self.register_proposer(proposer, pub_key)
 
     @property
     def height(self) -> int:
@@ -102,6 +130,7 @@ class Ledger:
         header: BlockHeader,
         body: BlockBody,
         current_state: StateProtocol,
+        public_keys: Mapping[str, bytes] | None = None,
     ) -> tuple[bool, str]:
         """Validate block integrity before committing or voting.
 
@@ -110,8 +139,9 @@ class Ledger:
         2. Parent hash must match the latest finalized block's hash.
         3. Height must be strictly latest_height + 1.
         4. Merkle tx_root must match hash of transactions in body.
-        5. Dry-run execution of transactions on state must succeed.
-        6. Resulting state_hash must match header.state_hash.
+        5. Proposer header signature must be valid under HEADER:<chain_id> (for height > 0).
+        6. Dry-run execution of transactions on state must succeed.
+        7. Resulting state_hash must match header.state_hash.
         """
         # 1. Header Hash Link
         expected_header_hash = compute_header_hash(header)
@@ -144,7 +174,26 @@ class Ledger:
                 f"got {header.tx_root.hex()}"
             )
 
-        # 5 & 6. State Dry-Run Validation
+        # 5. Header Signature Verification (height > 0)
+        if header.height > 0:
+            if not header.sig:
+                return False, "Header missing signature"
+
+            keys = public_keys if public_keys is not None else self._public_keys
+            pub_key = keys.get(header.proposer) if keys else None
+            if pub_key is None:
+                return False, f"Unknown proposer or missing public key: {header.proposer}"
+
+            payload = header_signing_payload(header)
+            domain = f"{DOMAIN_HEADER}:{self.chain_id}"
+            if self._crypto is not None and hasattr(self._crypto, "verify"):
+                valid_sig = self._crypto.verify(pub_key, domain, payload, header.sig)
+            else:
+                valid_sig = verify(pub_key, domain, payload, header.sig)
+            if not valid_sig:
+                return False, "Invalid header signature"
+
+        # 6 & 7. State Dry-Run Validation
         valid_txs, computed_state_hash = current_state.validate_and_compute_hash(
             body.transactions
         )

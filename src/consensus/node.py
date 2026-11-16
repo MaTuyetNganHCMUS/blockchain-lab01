@@ -120,14 +120,24 @@ class ValidatorNode:
         from ..security.locking import LockManager, VoteTracker
 
         crypto = Ed25519Crypto()
-        state = StateEngine(initial_data=initial_state)
-        ledger = Ledger(with_genesis=True)
-
         resolved_pub_keys = dict(pub_keys) if pub_keys is not None else {}
         resolved_priv_key = priv_key
         if resolved_priv_key is None:
             resolved_priv_key, derived_pub = crypto.generate_keypair()
             resolved_pub_keys.setdefault(node_id, derived_pub)
+
+        state = StateEngine(
+            initial_data=initial_state,
+            public_keys=resolved_pub_keys,
+            chain_id=chain_id,
+            crypto=crypto,
+        )
+        ledger = Ledger(
+            with_genesis=True,
+            public_keys=resolved_pub_keys,
+            chain_id=chain_id,
+            crypto=crypto,
+        )
 
         vote_tracker = VoteTracker(
             validators=validators,
@@ -218,8 +228,19 @@ class ValidatorNode:
 
     def submit_transaction(self, tx: Transaction) -> bool:
         """Ingest a transaction into node's local mempool."""
+        if hasattr(self.state, "verify_transaction_signature"):
+            if not self.state.verify_transaction_signature(tx):
+                return False
+        if not tx.key.startswith(f"{tx.sender}/"):
+            return False
         self.fsm.mempool.append(tx)
         return True
+
+    def register_participant(self, sender: str, public_key: bytes) -> None:
+        """Register a participant's public key for transaction validation."""
+        self.fsm.pub_keys[sender] = public_key
+        if hasattr(self.state, "register_participant"):
+            self.state.register_participant(sender, public_key)
 
     def handle_packet(self, sim_time: float | int, packet_bytes: bytes) -> None:
         """Route packet to consensus state machine."""

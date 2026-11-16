@@ -4,16 +4,85 @@ Owner: TV2
 """
 from __future__ import annotations
 
+import hashlib
 import unittest
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from src.common.interfaces import BlockBody, BlockHeader, Transaction
+from src.crypto import sign
 from src.execution import (
     Ledger,
     StateEngine,
     compute_header_hash,
     compute_tx_hash,
     compute_tx_root,
+    header_signing_payload,
+    tx_signing_payload,
 )
+
+
+def _derive_keypair(identity: str) -> tuple[bytes, bytes]:
+    seed = hashlib.sha256(f"t1_t2_key:{identity}".encode()).digest()
+    priv = Ed25519PrivateKey.from_private_bytes(seed)
+    priv_bytes = priv.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
+    )
+    pub_bytes = priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return priv_bytes, pub_bytes
+
+
+ALL_IDENTITIES = [f"validator-{i}" for i in range(8)] + [
+    "Alice",
+    "Bob",
+    "Charlie",
+    "David",
+    "Validator-0",
+    "target-node",
+]
+KEY_REGISTRY = {ident: _derive_keypair(ident) for ident in ALL_IDENTITIES}
+PUB_KEYS = {ident: pair[1] for ident, pair in KEY_REGISTRY.items()}
+
+
+def _sign_tx(sender: str, key: str, value: str, nonce: int, chain_id: str = "lab01") -> Transaction:
+    priv, _ = KEY_REGISTRY[sender]
+    u = Transaction(sender=sender, key=key, value=value, nonce=nonce)
+    sig = sign(priv, f"TX:{chain_id}", tx_signing_payload(u))
+    return Transaction(sender=sender, key=key, value=value, nonce=nonce, sig=sig)
+
+
+def _sign_header(
+    height: int,
+    round: int,
+    parent_hash: bytes,
+    state_hash: bytes,
+    tx_root: bytes,
+    proposer: str,
+    chain_id: str = "lab01",
+) -> BlockHeader:
+    priv, _ = KEY_REGISTRY[proposer]
+    u = BlockHeader(
+        height=height,
+        round=round,
+        parent_hash=parent_hash,
+        state_hash=state_hash,
+        tx_root=tx_root,
+        proposer=proposer,
+        sig=b"",
+    )
+    sig = sign(priv, f"HEADER:{chain_id}", header_signing_payload(u))
+    return BlockHeader(
+        height=height,
+        round=round,
+        parent_hash=parent_hash,
+        state_hash=state_hash,
+        tx_root=tx_root,
+        proposer=proposer,
+        sig=sig,
+    )
 
 
 class SimulatedNode:
@@ -21,8 +90,8 @@ class SimulatedNode:
 
     def __init__(self, node_id: str) -> None:
         self.node_id = node_id
-        self.ledger = Ledger(with_genesis=True)
-        self.state = StateEngine()
+        self.ledger = Ledger(with_genesis=True, public_keys=PUB_KEYS)
+        self.state = StateEngine(public_keys=PUB_KEYS)
 
     def receive_and_commit_block(self, header: BlockHeader, body: BlockBody) -> bool:
         """Process incoming block: validate integrity and commit to local state and ledger."""
@@ -48,8 +117,8 @@ class TestE2EScenarios(unittest.TestCase):
         nonces = {"Alice": 0, "Bob": 0, "Charlie": 0, "David": 0}
 
         # Reference authority node to produce consensus blocks
-        authority_state = StateEngine()
-        authority_ledger = Ledger(with_genesis=True)
+        authority_state = StateEngine(public_keys=PUB_KEYS)
+        authority_ledger = Ledger(with_genesis=True, public_keys=PUB_KEYS)
 
         for height in range(1, 6):
             proposer = proposers[height - 1]
@@ -58,7 +127,7 @@ class TestE2EScenarios(unittest.TestCase):
             # 4 transactions per block (1 per user)
             for user in ["Alice", "Bob", "Charlie", "David"]:
                 nonces[user] += 1
-                tx = Transaction(
+                tx = _sign_tx(
                     sender=user,
                     key=f"{user}/balance",
                     value=str(100 * height + nonces[user]),
@@ -73,7 +142,7 @@ class TestE2EScenarios(unittest.TestCase):
             tx_root = compute_tx_root([compute_tx_hash(tx) for tx in block_txs])
             parent_hash = authority_ledger.get_latest_hash()
 
-            header = BlockHeader(
+            header = _sign_header(
                 height=height,
                 round=0,
                 parent_hash=parent_hash,
@@ -129,11 +198,11 @@ class TestE2EScenarios(unittest.TestCase):
         node = SimulatedNode("target-node")
 
         # Step 1: Commit Block 1 normally
-        tx1 = Transaction(sender="Alice", key="Alice/data", value="initial", nonce=1)
+        tx1 = _sign_tx(sender="Alice", key="Alice/data", value="initial", nonce=1)
         valid, s1_hash = node.state.validate_and_compute_hash([tx1])
         self.assertTrue(valid)
 
-        header1 = BlockHeader(
+        header1 = _sign_header(
             height=1,
             round=0,
             parent_hash=node.ledger.get_latest_hash(),
@@ -160,14 +229,14 @@ class TestE2EScenarios(unittest.TestCase):
         )
 
         # Simulation: Out-of-order transaction delivery (nonce 3 arrives before nonce 2)
-        tx_nonce3 = Transaction(sender="Alice", key="Alice/data", value="future", nonce=3)
+        tx_nonce3 = _sign_tx(sender="Alice", key="Alice/data", value="future", nonce=3)
         self.assertFalse(
             node.state.apply_transaction(tx_nonce3),
             msg="Out-of-order transaction must be rejected",
         )
 
         # Legitimate sequential nonce 2 arrives -> accepted
-        tx_nonce2 = Transaction(sender="Alice", key="Alice/data", value="updated", nonce=2)
+        tx_nonce2 = _sign_tx(sender="Alice", key="Alice/data", value="updated", nonce=2)
         self.assertTrue(node.state.apply_transaction(tx_nonce2))
         self.assertEqual(node.state.get("Alice/data"), "updated")
         self.assertEqual(node.state.get_nonce("Alice"), 2)

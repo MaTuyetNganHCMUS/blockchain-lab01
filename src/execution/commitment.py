@@ -8,6 +8,8 @@ import hashlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from ..common.serializer import encode_canonical
+
 if TYPE_CHECKING:
     from ..common.interfaces import BlockHeader, Transaction
 
@@ -17,10 +19,37 @@ def sha256(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
 
 
+def tx_signing_payload(tx: Transaction) -> bytes:
+    """Compute canonical deterministic signing payload of a Transaction under TX:<chain_id>."""
+    return encode_canonical(
+        {
+            "sender": tx.sender,
+            "key": tx.key,
+            "value": tx.value,
+            "nonce": tx.nonce,
+        }
+    )
+
+
 def compute_tx_hash(tx: Transaction) -> bytes:
-    """Compute deterministic SHA-256 hash of a Transaction."""
-    raw = f"{tx.sender}:{tx.key}:{tx.value}:{tx.nonce}".encode()
-    return sha256(raw)
+    """Compute deterministic SHA-256 hash of a Transaction using canonical encoding."""
+    return sha256(tx_signing_payload(tx))
+
+
+def header_signing_payload(header: BlockHeader) -> bytes:
+    """Compute canonical deterministic signing payload of a BlockHeader under HEADER:<chain_id>."""
+    from ..common.interfaces import BlockHeader
+
+    raw = BlockHeader(
+        height=header.height,
+        round=header.round,
+        parent_hash=header.parent_hash,
+        state_hash=header.state_hash,
+        tx_root=header.tx_root,
+        proposer=header.proposer,
+        sig=b"",
+    )
+    return encode_canonical(raw)
 
 
 def compute_header_hash(header: BlockHeader) -> bytes:
@@ -64,7 +93,7 @@ def compute_state_commitment(data: dict[str, str]) -> bytes:
     """Compute deterministic State Commitment Merkle Root.
 
     1. Sorts all key-value pairs lexicographically by key.
-    2. Hashes each leaf as sha256(f"{key}:{value}".encode("utf-8")).
+    2. Hashes each leaf as sha256(encode_canonical((key, value))).
     3. Builds binary Merkle tree to produce 32-byte state root.
     """
     if not data:
@@ -72,7 +101,7 @@ def compute_state_commitment(data: dict[str, str]) -> bytes:
 
     sorted_items = sorted(data.items(), key=lambda kv: kv[0])
     leaf_hashes = [
-        sha256(f"{k}:{v}".encode()) for k, v in sorted_items
+        sha256(encode_canonical((k, v))) for k, v in sorted_items
     ]
     return compute_merkle_root(leaf_hashes)
 
@@ -90,5 +119,7 @@ __all__ = [
     "compute_state_commitment",
     "compute_tx_hash",
     "compute_tx_root",
+    "header_signing_payload",
     "sha256",
+    "tx_signing_payload",
 ]

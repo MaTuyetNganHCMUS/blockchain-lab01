@@ -123,6 +123,10 @@ class ConsensusFSM(ConsensusProtocol):
             self.priv_key = b"default_priv_key_" + self.node_id.encode("utf-8")
 
         self.pub_keys: dict[str, bytes] = dict(pub_keys) if pub_keys else {}
+        if hasattr(self.ledger, "set_public_keys"):
+            self.ledger.set_public_keys(self.pub_keys)
+        if hasattr(self.state, "set_public_keys"):
+            self.state.set_public_keys(self.pub_keys)
 
         # Timeout configuration
         self.timeout_propose = timeout_propose
@@ -151,6 +155,10 @@ class ConsensusFSM(ConsensusProtocol):
         self.block_cache: dict[bytes, tuple[BlockHeader, BlockBody]] = {}
         self.votes_cast: list[Vote] = []
         self.finalized_blocks: list[tuple[BlockHeader, BlockBody]] = []
+        self.pending_commits: dict[bytes, tuple[float | int, int, int]] = {}
+        self.unlinked_bodies: dict[bytes, BlockBody] = {}
+        self.future_headers: dict[int, list[BlockHeader]] = {}
+        self.future_votes: dict[int, list[Vote]] = {}
 
     # ==========================================================================
     # PROPOSER & TIMEOUT HELPERS
@@ -251,6 +259,7 @@ class ConsensusFSM(ConsensusProtocol):
         self.valid_block = None
         self.valid_round = -1
         self.round_advanced.clear()
+        self.pending_commits.clear()
         if hasattr(self.vote_tracker, "set_expected_height"):
             self.vote_tracker.set_expected_height(height)
         if hasattr(self.lock_manager, "start_height"):
@@ -258,6 +267,11 @@ class ConsensusFSM(ConsensusProtocol):
         elif hasattr(self.lock_manager, "unlock"):
             self.lock_manager.unlock()
         self.start_round(sim_time, 0)
+        # Replay future headers and votes that arrived early for this height
+        for hdr in self.future_headers.pop(height, []):
+            self.on_proposal_header(sim_time, hdr)
+        for vt in self.future_votes.pop(height, []):
+            self.on_vote(sim_time, vt)
 
     def _schedule_step_timeout(self, step: str, base_delay: float) -> None:
         """Schedule discrete-event timeout using TV3 'H:R:STEP' tag convention."""
@@ -370,58 +384,79 @@ class ConsensusFSM(ConsensusProtocol):
 
     def on_proposal_header(self, sim_time: float | int, header: BlockHeader) -> None:
         """Process incoming proposed BlockHeader."""
-        if header.height != self.height or header.round != self.round:
+        if header.height > self.height:
+            self.future_headers.setdefault(header.height, []).append(header)
+            return
+        if header.height < self.height:
             return
 
-        expected_proposer = self.get_proposer(self.height, self.round)
+        expected_proposer = self.get_proposer(header.height, header.round)
         if header.proposer != expected_proposer:
             # Reject proposal from non-designated proposer
             return
 
         # Check signature under HEADER:<chain_id>
         pub_key = self.pub_keys.get(header.proposer)
-        if pub_key is not None:
-            # Reconstruct unsigned header for canonical signature verification
-            raw_hdr = BlockHeader(
-                height=header.height,
-                round=header.round,
-                parent_hash=header.parent_hash,
-                state_hash=header.state_hash,
-                tx_root=header.tx_root,
-                proposer=header.proposer,
-            )
-            canonical_bytes = self.crypto.encode_canonical(raw_hdr)
-            if not self.crypto.verify(
-                pub_key,
-                f"{DOMAIN_HEADER}:{self.chain_id}",
-                canonical_bytes,
-                header.sig,
-            ):
-                return
+        if pub_key is None:
+            # Reject proposal from proposer without registered public key
+            return
+        if not header.sig:
+            # Reject proposal without signature
+            return
 
+        from ..execution.commitment import header_signing_payload
+
+        canonical_bytes = header_signing_payload(header)
+        if not self.crypto.verify(
+            pub_key,
+            f"{DOMAIN_HEADER}:{self.chain_id}",
+            canonical_bytes,
+            header.sig,
+        ):
+            return
+
+        header_hash = self._compute_header_hash(header)
         existing = self.proposals.get((header.height, header.round))
-        body = existing[1] if existing else None
+        body = existing[1] if (existing and existing[1] is not None) else self.unlinked_bodies.pop(header_hash, None)
         self.proposals[(header.height, header.round)] = (header, body)
 
-        # If body is already present or empty, evaluate prevote
         if body is not None:
-            self._evaluate_proposal_and_prevote(sim_time, header, body)
+            self.block_cache[header_hash] = (header, body)
+            if header_hash in self.pending_commits:
+                self._finalize_block(sim_time, header_hash)
+            elif header.round == self.round:
+                self._evaluate_proposal_and_prevote(sim_time, header, body)
         else:
             # Request block body from proposer
-            hdr_hash = self._compute_header_hash(header)
-            req_packet = pack_message(MSG_BODY_REQUEST, hdr_hash)
+            req_packet = pack_message(MSG_BODY_REQUEST, header_hash)
             self.network.send(self.node_id, header.proposer, req_packet)
 
     def on_proposal_body(self, sim_time: float | int, body: BlockBody) -> None:
         """Process incoming BlockBody."""
         existing = self.proposals.get((self.height, self.round))
-        if existing and existing[0]:
+        matched_round = None
+        if existing and existing[0] and self._compute_header_hash(existing[0]) == body.header_hash:
+            matched_round = self.round
             header = existing[0]
+        else:
+            for (h, r), prop in self.proposals.items():
+                if h == self.height and prop[0] and self._compute_header_hash(prop[0]) == body.header_hash:
+                    matched_round = r
+                    header = prop[0]
+                    break
+            else:
+                header = None
+
+        if header is not None:
             header_hash = self._compute_header_hash(header)
-            if body.header_hash == header_hash:
-                self.proposals[(self.height, self.round)] = (header, body)
-                self.block_cache[header_hash] = (header, body)
+            self.proposals[(self.height, matched_round)] = (header, body)
+            self.block_cache[header_hash] = (header, body)
+            if header_hash in self.pending_commits:
+                self._finalize_block(sim_time, header_hash)
+            elif matched_round == self.round:
                 self._evaluate_proposal_and_prevote(sim_time, header, body)
+        else:
+            self.unlinked_bodies[body.header_hash] = body
 
     def _evaluate_proposal_and_prevote(
         self,
@@ -538,7 +573,10 @@ class ConsensusFSM(ConsensusProtocol):
 
     def on_vote(self, sim_time: float | int, vote: Vote) -> None:
         """Process incoming Vote packet."""
-        if vote.height != self.height or vote.round != self.round:
+        if vote.height > self.height:
+            self.future_votes.setdefault(vote.height, []).append(vote)
+            return
+        if vote.height < self.height or vote.round != self.round:
             return
 
         # Check signature if public key is known and signature is provided
@@ -598,7 +636,7 @@ class ConsensusFSM(ConsensusProtocol):
 
         elif phase == PHASE_PRECOMMIT:
             if quorum_res.block_hash != NIL_BLOCK_HASH:
-                # Finalize block!
+                self.pending_commits[quorum_res.block_hash] = (sim_time, self.height, self.round)
                 self._finalize_block(sim_time, quorum_res.block_hash)
             else:
                 # Quorum of Precommit NIL -> Advance round once
@@ -606,28 +644,60 @@ class ConsensusFSM(ConsensusProtocol):
                     self.round_advanced.add((self.height, self.round))
                     self.start_round(sim_time, self.round + 1)
 
-    def _finalize_block(self, sim_time: float | int, block_hash: bytes) -> None:
-        """Commit finalized block to state and ledger, then advance height."""
+    def _validate_block_data(self, header: BlockHeader, body: BlockBody) -> tuple[bool, str]:
+        """Validate block header and body before committing to state and ledger."""
+        header_hash = self._compute_header_hash(header)
+        if body.header_hash and body.header_hash != header_hash:
+            return False, "Body header_hash does not match computed header hash"
+
+        if hasattr(self.ledger, "validate_block"):
+            return self.ledger.validate_block(header, body, self.state)
+
+        expected_parent = self._expected_parent_hash()
+        if header.parent_hash != expected_parent:
+            return False, f"Parent hash mismatch: expected {expected_parent.hex()}, got {header.parent_hash.hex()}"
+
+        if header.height != self.height:
+            return False, f"Height mismatch: expected {self.height}, got {header.height}"
+
+        if hasattr(self.state, "validate_and_compute_hash"):
+            valid_txs, computed_state_hash = self.state.validate_and_compute_hash(body.transactions)
+            if not valid_txs:
+                return False, "Transactions validation failed"
+            if header.state_hash and computed_state_hash != header.state_hash:
+                return False, f"State hash mismatch: expected {header.state_hash.hex()}, got {computed_state_hash.hex()}"
+
+        return True, "Valid"
+
+    def _finalize_block(self, sim_time: float | int, block_hash: bytes) -> bool:
+        """Validate and commit finalized block to state and ledger, then advance height."""
         if self.step == STEP_COMMIT or self.height in self.finalized_heights:
-            return
-        self.step = STEP_COMMIT
-        self.finalized_heights.add(self.height)
+            return False
 
         cached = self.block_cache.get(block_hash)
         if not cached:
-            # Fallback construct placeholder if body was delivered out of band
-            cached_hdr = BlockHeader(
-                height=self.height,
-                round=self.round,
-                parent_hash=self._expected_parent_hash(),
-                state_hash=b"",
-                tx_root=b"",
-                proposer=self.get_proposer(self.height, self.round),
-            )
-            cached_body = BlockBody(header_hash=block_hash, transactions=())
-            cached = (cached_hdr, cached_body)
+            # Block data not yet available: do NOT finalize or construct placeholder.
+            # Request block body from proposer
+            proposer = self.get_proposer(self.height, self.round)
+            req_packet = pack_message(MSG_BODY_REQUEST, block_hash)
+            self.network.send(self.node_id, proposer, req_packet)
+            return False
 
         header, body = cached
+        if body is None:
+            proposer = self.get_proposer(self.height, self.round)
+            req_packet = pack_message(MSG_BODY_REQUEST, block_hash)
+            self.network.send(self.node_id, proposer, req_packet)
+            return False
+
+        is_valid, reason = self._validate_block_data(header, body)
+        if not is_valid:
+            return False
+
+        self.step = STEP_COMMIT
+        self.finalized_heights.add(self.height)
+        self.pending_commits.pop(block_hash, None)
+
         self.state.commit_block(body)
         self.ledger.add_finalized_block(header, body)
         self.finalized_blocks.append((header, body))
@@ -644,6 +714,7 @@ class ConsensusFSM(ConsensusProtocol):
 
         # Advance to next block height
         self.start_height(sim_time, self.height + 1)
+        return True
 
     # ==========================================================================
     # TIMEOUT HANDLERS (LIVENESS & ROUND ADVANCE)
@@ -724,6 +795,11 @@ class ConsensusFSM(ConsensusProtocol):
         elif msg_type == MSG_VOTE and isinstance(payload, Vote):
             self.on_vote(sim_time, payload)
         elif msg_type == MSG_TX and isinstance(payload, Transaction):
+            if hasattr(self.state, "verify_transaction_signature"):
+                if not self.state.verify_transaction_signature(payload):
+                    return
+            if not payload.key.startswith(f"{payload.sender}/"):
+                return
             self.mempool.append(payload)
         elif msg_type == MSG_BODY_REQUEST and isinstance(payload, bytes):
             # Reply with body if in block cache
