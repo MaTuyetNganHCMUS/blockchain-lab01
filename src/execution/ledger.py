@@ -228,6 +228,13 @@ class Ledger:
     def add_finalized_block(self, header: BlockHeader, body: BlockBody) -> None:
         """Append block to finalized chain and prune from pending pool (LedgerProtocol)."""
         header_hash = body.header_hash if body.header_hash else compute_header_hash(header)
+        if header.height in self._blocks_by_height:
+            existing_header, existing_body = self._blocks_by_height[header.height]
+            existing_hash = existing_body.header_hash if existing_body.header_hash else compute_header_hash(existing_header)
+            if existing_hash == header_hash:
+                return
+            raise ValueError(f"Conflicting block already finalized at height {header.height}")
+
         self._finalized_chain.append((header, body))
         self._blocks_by_height[header.height] = (header, body)
         self._blocks_by_hash[header_hash] = (header, body)
