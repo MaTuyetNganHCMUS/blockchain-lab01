@@ -17,7 +17,7 @@ Minimal Layer 1 Blockchain & BFT Consensus Simulator (`n = 3f + 1`, Tendermint-s
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+python -m pip install "cryptography>=42.0" "pytest>=8.0"
 ```
 
 If PowerShell blocks script activation:
@@ -32,7 +32,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+python -m pip install "cryptography>=42.0" "pytest>=8.0"
 ```
 
 ## Run Simulator (CLI)
