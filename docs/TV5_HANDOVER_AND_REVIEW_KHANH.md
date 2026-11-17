@@ -69,7 +69,7 @@ flowchart TB
 | :--- | :--- | :--- | :--- |
 | **TV1** | Tuyết Ngân | Mật mã học, băm dữ liệu, tuần tự hóa chuẩn hóa tất định và phân tách miền chữ ký | `src/crypto/ed25519.py`<br/>`src/crypto/keys.py`<br/>`src/common/serializer.py` |
 | **TV2** | Thái Nguyên Trường | Máy thực thi trạng thái KV, kiểm tra nonce/sở hữu tài khoản, tính cam kết Merkle và sổ cái lưu trữ | `src/execution/state.py`<br/>`src/execution/ledger.py`<br/>`src/execution/commitment.py` |
-| **TV3** | Cao Nguyễn Phúc Đạt | Trình mô phỏng mạng sự kiện rời rạc, giới hạn lưu lượng, lan truyền Header và đồng bộ Body | `src/network/simulator.py`<br/>`src/network/gossip.py`<br/>`src/network/rate_limiter.py` |
+| **TV3** | Cao Nguyễn Phúc Đạt | Trình mô phỏng mạng sự kiện rời rạc, giới hạn lưu lượng, lan truyền Header và đồng bộ Body | `src/network/simulator.py`<br/>`src/network/rate_limiter.py` |
 | **TV4** | Phan Hoàng Quốc Huy | Máy trạng thái đồng thuận FSM, chọn Proposer, bộ đếm timeout thích ứng và điều phối ValidatorNode | `src/consensus/fsm.py`<br/>`src/consensus/node.py`<br/>`src/consensus/proposer.py` |
 | **TV5** | **Khánh (23120282)** | **7 quy tắc khóa phiếu, bắt gian lận Equivocation, mô phỏng tấn công Byzantine và ghi log tất định** | `src/security/locking.py`<br/>`src/security/byzantine.py`<br/>`src/observability/logger.py` |
 

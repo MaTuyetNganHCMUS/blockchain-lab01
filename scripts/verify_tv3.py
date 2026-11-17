@@ -21,17 +21,20 @@ sys.path.insert(0, str(root_dir))
 
 from src.common.interfaces import (
     EVENT_BLOCK,
+    EVENT_REJECT_BODY,
     EVENT_UNBLOCK,
     GENESIS_PARENT_HASH,
+    MSG_BODY,
     BlockBody,
     BlockHeader,
     NetworkProtocol,
     Transaction,
 )
 from src.common.mocks import MockCrypto, MockLogger
-from src.network.gossip import GossipManager
+from src.consensus.codec import pack_message
 from src.network.rate_limiter import RateLimiter, RateLimiterConfig
 from src.network.simulator import NetworkConfig, NetworkSimulator
+from src.simulation import build_integrated_cluster, sign_tx
 
 
 def print_section(title: str) -> None:
@@ -100,40 +103,51 @@ def main() -> None:
         f"Ghi nhận sự kiện EVENT_UNBLOCK trong hệ thống log: {unblock_logs[0]['detail'] if unblock_logs else ''}",
     )
 
-    # 3. Two-phase Gossip Protocol (Header-before-Body)
+    # 3. Two-phase Header-before-Body Protocol (ConsensusFSM & ValidatorNode)
     print_section("3. Kiểm tra Giao thức Gossip 2 pha (Header-before-Body)")
-    crypto = MockCrypto()
-    receiver_gossip = GossipManager(node_id="receiver_node", crypto=crypto)
+    net_cfg_hbb = NetworkConfig(gst=0.0, delta=0.1, min_delay=0.01, max_delay_pre_gst=0.1, seed=42)
+    validators, nodes, cluster_sim, cluster_logger, _, users = build_integrated_cluster(
+        validator_count=4,
+        network_config=net_cfg_hbb,
+    )
+    proposer = nodes["node0"].fsm.get_proposer(1, 0)
+    receiver = next(v for v in validators if v != proposer)
+    receiver_node = nodes[receiver]
 
-    dummy_tx = Transaction(sender="Alice", key="Alice/msg", value="hello", nonce=1)
-    orphan_body = BlockBody(header_hash=b"unknown_header_hash", transactions=[dummy_tx])
+    # Orphan body test: send MSG_BODY for an unaccepted header hash
+    dummy_body = BlockBody(header_hash=b"\xaa" * 32, transactions=())
+    receiver_node.handle_packet(0.0, pack_message(MSG_BODY, dummy_body), sender=proposer)
 
-    accepted = receiver_gossip.handle_body_packet(sender="proposer", body=orphan_body)
+    rejected_body_event = any(
+        r.event_type == EVENT_REJECT_BODY and r.node_id == receiver
+        for r in cluster_logger.records
+    )
     check_assertion(
-        not accepted,
+        rejected_body_event and dummy_body.header_hash not in receiver_node.fsm.accepted_headers,
         "Đúng luật Mục 6: BlockBody gửi đến khi chưa nhận/duyệt Header bị TỪ CHỐI thẳng",
     )
 
-    valid_header = BlockHeader(
-        height=1,
-        round=0,
-        parent_hash=GENESIS_PARENT_HASH,
-        state_hash=b"state1",
-        tx_root=b"txroot1",
-        proposer="proposer",
-    )
-    header_hash = receiver_gossip._compute_header_hash(valid_header)
-    valid_body = BlockBody(header_hash=header_hash, transactions=[dummy_tx])
+    # Pha 1: Proposer broadcasts BlockHeader upon proposing block
+    tx = sign_tx("Alice", users["Alice"], "Alice/msg", "hello", 1)
+    nodes[proposer].submit_transaction(tx)
+    for n in nodes.values():
+        n.start(0.0)
 
-    h_ok = receiver_gossip.handle_header_packet(sender="proposer", header=valid_header)
+    # Run network briefly to deliver Header to receiver
+    cluster_sim.run_until(0.05)
+    accepted_hdr_hashes = list(receiver_node.fsm.accepted_headers)
     check_assertion(
-        h_ok and (header_hash in receiver_gossip.accepted_headers),
+        len(accepted_hdr_hashes) > 0,
         "Pha 1: Nhận và chấp thuận BlockHeader thành công",
     )
 
-    b_ok = receiver_gossip.handle_body_packet(sender="proposer", body=valid_body)
+    # Pha 2: Receiver sent BODY_REQUEST, Proposer replied with BODY, Receiver accepted full block
+    cluster_sim.run_until(0.3)
+    target_hash = accepted_hdr_hashes[0]
+    cached_block = receiver_node.fsm.block_cache.get(target_hash)
+    b_ok = cached_block is not None and cached_block[1] is not None
     check_assertion(
-        b_ok and receiver_gossip.has_full_block(header_hash),
+        b_ok,
         "Pha 2: Sau khi đã có Header, BlockBody tương ứng được CHẤP THUẬN",
     )
 

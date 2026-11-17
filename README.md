@@ -85,7 +85,7 @@ blockchain-lab01/
 |   |-- common/              Core frozen models, protocols, serializer & mocks
 |   |-- crypto/              TV1: Ed25519, SHA-256, canonical encoding & keys
 |   |-- execution/           TV2: state engine, commitments, ledger & bounded mempool
-|   |-- network/             TV3: discrete-event simulator, gossip & rate limiting
+|   |-- network/             TV3: discrete-event simulator, packet delivery & rate limiting
 |   |-- consensus/           TV4: consensus FSM, wire codec & validator node
 |   |-- security/            TV5: BFT quorum validation, locking rules & Byzantine simulator
 |   `-- observability/       TV5: byte-identical deterministic event logger

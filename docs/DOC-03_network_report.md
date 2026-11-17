@@ -111,9 +111,22 @@ Gọi $t_{\text{current}}$ là thời điểm gửi gói tin từ nút $u$ sang 
 
 ---
 
-### 4. Giao thức Truyền Khối 2 Pha (Header-before-Body Gossip)
+### 4. Giao thức Truyền Khối 2 Pha (Header-before-Body Protocol) & Chiến lược Truyền tin
 
-Nhằm tối ưu hóa băng thông mạng và ngăn chặn việc nút mạng phải lưu trữ các khối dữ liệu rác không rõ nguồn gốc, giao thức bắt buộc phân tách quy trình truyền phát khối thành 2 pha tuần tự:
+Nhằm tối ưu hóa băng thông mạng và ngăn chặn việc nút mạng phải lưu trữ các khối dữ liệu rác không rõ nguồn gốc, hệ thống phân tách rõ rệt các chiến lược truyền tin cho từng loại thông điệp theo thiết kế:
+
+#### 4.1. Bảng Phân định Chiến lược Truyền tin (Message Propagation Strategies)
+
+| Loại Thông điệp (Message) | Chiến lược Truyền tin (Strategy) | Thành phần Xử lý Chính |
+| :--- | :--- | :--- |
+| **Transaction (Giao dịch)** | **Bounded Gossip** (Fanout mặc định = 4) | `ConsensusFSM.admit_transaction()` $\rightarrow$ `ConsensusFSM._gossip_transaction()` qua `NetworkSimulator.send()` |
+| **Block Header (Đầu khối)** | **Broadcast** tới tất cả validator | `ConsensusFSM._propose_block()` qua `NetworkSimulator.broadcast_header()` |
+| **Block Body (Thân khối)** | **Request/Response** (Kéo theo yêu cầu) | `ConsensusFSM.on_proposal_header()` $\rightarrow$ `MSG_BODY_REQUEST` $\rightarrow$ `MSG_BODY` $\rightarrow$ `ConsensusFSM.on_proposal_body()` |
+| **PREVOTE (Phiếu pha 1)** | **Direct Fanout** tới các validator | `ConsensusFSM.cast_vote(PHASE_PREVOTE)` qua `NetworkSimulator.send()` |
+| **PRECOMMIT (Phiếu pha 2)** | **Direct Fanout** tới các validator | `ConsensusFSM.cast_vote(PHASE_PRECOMMIT)` qua `NetworkSimulator.send()` |
+
+> **Ghi chú Kiến trúc Thực thi (Architecture Note):**  
+> Ban đầu, TV3 hiện thực nguyên mẫu Header-before-Body độc lập trong `GossipManager`. Trong kiến trúc tích hợp toàn diện của hệ thống, nhằm tránh trùng lặp trách nhiệm và bảo đảm tính nhất quán của máy trạng thái đồng thuận, **`ConsensusFSM` (`src/consensus/fsm.py`) là implementation chính thức và duy nhất** trực tiếp điều phối Header-before-Body và TX Gossip trên nền tảng `NetworkSimulator` (`src/network/simulator.py`).
 
 ```mermaid
 sequenceDiagram
@@ -136,18 +149,18 @@ sequenceDiagram
         Proposer->>Peer: Send NetPacket(MSG_BODY, BlockBody)
         Note over Peer: Kiểm tra body.header_hash in accepted_headers
         alt Header Chưa Từng Được Chấp Thuận
-            Note over Peer: TỪ CHỐI & DROP BlockBody mồ côi!
+            Note over Peer: TỪ CHỐI & DROP BlockBody mồ côi (REJECT_BODY)!
         else Header Đã Được Chấp Thuận Trước
-            Note over Peer: accepted_bodies[header_hash] = body -> RÁP FULL BLOCK!
+            Note over Peer: Ráp Block hoàn chỉnh, thẩm định State & Merkle Root!
         end
     end
 ```
 
-#### 4.1. Cơ chế Chống Tấn công "Orphan Body Flooding"
+#### 4.2. Cơ chế Chống Tấn công "Orphan Body Flooding"
 Nếu một nút tấn công cố tình bỏ qua pha phát tán Header và trực tiếp spam các gói tin `BlockBody` kích thước lớn vào mạng:
-* Phương thức `handle_body_packet()` tại nút nhận kiểm tra điều kiện tiên quyết:
+* Phương thức `on_proposal_body()` trong `ConsensusFSM` tại nút nhận kiểm tra điều kiện tiên quyết:
   $$\text{body.header\_hash} \in \text{self.accepted\_headers}$$
-* Nếu điều kiện trên trả về `False`, khối dữ liệu lập tức bị loại bỏ, không giải mã danh sách giao dịch, loại trừ hoàn toàn nguy cơ cạn kiệt bộ nhớ RAM.
+* Nếu điều kiện trên trả về `False`, khối dữ liệu lập tức bị loại bỏ, ghi nhận sự kiện `EVENT_REJECT_BODY` với lý do `REASON_UNACCEPTED_HEADER`, không giải mã danh sách giao dịch, loại trừ hoàn toàn nguy cơ cạn kiệt bộ nhớ RAM.
 
 ---
 
@@ -182,9 +195,9 @@ Toàn bộ mã nguồn của TV3 đã được đóng gói hoàn chỉnh trong t
 
 | Nhóm Kiểm thử | File Kịch bản | Số test | Thời gian | Kết quả |
 | :--- | :--- | :---: | :---: | :---: |
-| **Unit Test Độc lập** | `tests/unit/test_network.py` | 9 | 0.19s | **100% PASS** |
-| **E2E Test Kịch bản T5** | `tests/e2e/test_t5_partial_synchrony.py` | 2 | 0.18s | **100% PASS** |
-| **Toàn bộ Test Suite** | `tests/` (Unit + Skeleton + Mocks + E2E) | 29 | 0.24s | **100% PASS** |
+| **Unit Test Độc lập & Tích hợp** | `tests/unit/test_network.py` | 13 | 0.10s | **100% PASS** |
+| **E2E Test Kịch bản T5** | `tests/e2e/test_t5_partial_synchrony.py` | 2 | 0.05s | **100% PASS** |
+| **Toàn bộ Test Suite** | `tests/` (Unit + E2E T1-T8 + Security) | 126 | 3.5s | **100% PASS** |
 | **Script Đối soát Trực quan** | `scripts/verify_tv3.py` | 5 nhóm | < 0.10s | **100% PASS** |
 
 #### 6.1. Chi tiết Kiểm thử Đầu-cuối Kịch bản T5 (`test_t5_partial_synchrony.py`)
