@@ -67,28 +67,21 @@ def compute_header_hash(header: BlockHeader) -> bytes:
 def compute_merkle_root(leaf_hashes: Sequence[bytes]) -> bytes:
     """Compute binary Merkle tree root from an ordered list of leaf hashes.
 
-    Uses RFC 6962 domain separation (0x01 prefix for internal nodes) to prevent
-    second-preimage attacks and duplicate-leaf vulnerabilities.
+    Uses RFC 6962 tree construction and domain separation (0x01 prefix for
+    internal nodes) to prevent second-preimage attacks and duplicate-leaf
+    vulnerabilities (eliminating CVE-2012-2459 without duplicating odd leaves).
     """
     if not leaf_hashes:
         return sha256(b"")
 
-    current_level = list(leaf_hashes)
+    if len(leaf_hashes) == 1:
+        return leaf_hashes[0]
 
-    while len(current_level) > 1:
-        next_level: list[bytes] = []
-        if len(current_level) % 2 != 0:
-            current_level.append(current_level[-1])
-
-        for i in range(0, len(current_level), 2):
-            left = current_level[i]
-            right = current_level[i + 1]
-            combined = sha256(b"\x01" + left + right)
-            next_level.append(combined)
-
-        current_level = next_level
-
-    return current_level[0]
+    # Split at the largest power of 2 strictly less than len(leaf_hashes)
+    k = 1 << ((len(leaf_hashes) - 1).bit_length() - 1)
+    left = compute_merkle_root(leaf_hashes[:k])
+    right = compute_merkle_root(leaf_hashes[k:])
+    return sha256(b"\x01" + left + right)
 
 
 def compute_state_commitment(data: dict[str, str]) -> bytes:

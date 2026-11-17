@@ -123,8 +123,10 @@ class StateEngine:
             return False
 
         # Rule 1: Ownership Access Control
+        if not tx.sender:
+            return False
         expected_prefix = f"{tx.sender}/"
-        if not tx.key.startswith(expected_prefix):
+        if not tx.key.startswith(expected_prefix) or len(tx.key) <= len(expected_prefix):
             return False
 
         # Rule 2: Replay Protection by Hash
@@ -157,7 +159,7 @@ class StateEngine:
         dry_run_state = self.clone()
         for tx in transactions:
             if not dry_run_state.apply_transaction(tx):
-                return False, self.get_state_hash()
+                return False, b""
 
         return True, dry_run_state.get_state_hash()
 
