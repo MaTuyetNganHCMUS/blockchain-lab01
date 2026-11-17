@@ -7,6 +7,7 @@ from .byzantine import (
     DirectedVote,
     ReplayBatch,
 )
+from .determinism import verify_determinism
 from .locking import (
     EquivocationEvidence,
     LockManager,
@@ -27,5 +28,6 @@ __all__ = [
     "ReplayBatch",
     "VoteTracker",
     "validate_bft_validator_set",
+    "verify_determinism",
     "vote_signing_bytes",
 ]

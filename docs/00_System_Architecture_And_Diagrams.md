@@ -29,7 +29,7 @@ graph TB
         %% TV3
         subgraph TV3["1. Tầng Giao tiếp Mạng (TV3 - Network Layer)"]
             direction LR
-            P2P["P2P Gossip Engine<br/>(Header-First Diffusion)"]
+            P2P["Network Simulator & Transport<br/>(Header Broadcast, Discrete-Event Timeline)"]
             RateLimiter["Rate Limiter & Overactive Peer Blocker"]
             NetLogger["Network Event Logger<br/>(send, drop, delay, block, unblock)"]
             InboundQueue["Inbound Priority Queue"]
@@ -71,7 +71,7 @@ graph TB
     end
 
     %% Tương tác liên tầng
-    TV3 <-->|"Gossip Messages (Header, Body, Votes)"| TV4
+    TV3 <-->|"Network Packets (Header Broadcast, Body Req/Resp, Vote Fanout)"| TV4
     TV4 <-->|"Xác thực điều kiện khóa (Lock/Unlock)"| TV5
     TV4 -->|"1. Trích xuất Txs đóng khối"| Mempool
     TV4 -->|"2. Dry-run tính state_hash"| StateEngine
@@ -161,6 +161,18 @@ Theo **Mục 6 của Lab01.pdf**, tầng mạng mô phỏng kênh truyền bất
 1. **Header broadcast trước Body:** Một Node chỉ gửi `BlockBody` khi nút nhận đã nhận và chấp nhận `BlockHeader` tương ứng.
 2. **Kiểm soát tốc độ (Rate Limiting) & Chặn peer quá tải (Peer Blocking):** Mỗi node giới hạn lưu lượng phát ra và tạm thời block các peer vượt ngưỡng gửi bản tin.
 3. **Nhật ký mạng đầy đủ:** Mọi sự kiện (`send`, `drop`, `delay`, `block`, `unblock`) đều phải được ghi log kèm timestamp, node ID, type và height.
+
+### 3.1. Phân định Chiến lược Truyền tin (Message Propagation Strategies)
+
+| Message | Strategy | Execution Flow |
+| :--- | :--- | :--- |
+| **Transaction** | **Bounded Gossip** (fanout = 4) | `ConsensusFSM.admit_transaction()` $\rightarrow$ `_gossip_transaction()` $\rightarrow$ `NetworkSimulator.send()` $\rightarrow$ Peer Validators |
+| **Block Header** | **Broadcast** | `ConsensusFSM._propose_block()` $\rightarrow$ `NetworkSimulator.broadcast_header()` $\rightarrow$ Validator `on_proposal_header()` |
+| **Block Body** | **Request/Response** | Validator `on_proposal_header()` $\rightarrow$ `MSG_BODY_REQUEST` $\rightarrow$ Proposer `MSG_BODY` $\rightarrow$ `on_proposal_body()` |
+| **PREVOTE** | **Direct Fanout** | `ConsensusFSM.cast_vote(PHASE_PREVOTE)` $\rightarrow$ `NetworkSimulator.send()` $\rightarrow$ Peer Validators |
+| **PRECOMMIT** | **Direct Fanout** | `ConsensusFSM.cast_vote(PHASE_PRECOMMIT)` $\rightarrow$ `NetworkSimulator.send()` $\rightarrow$ Peer Validators |
+
+> **Quyết định kiến trúc:** Quá trình truyền tin Header-before-Body và TX Gossip được điều phối trực tiếp bởi `ConsensusFSM` (`src/consensus/fsm.py`) trên nền `NetworkSimulator` (`src/network/simulator.py`), không sử dụng module `GossipManager` độc lập nhằm tránh trùng lặp máy trạng thái.
 
 ```mermaid
 sequenceDiagram

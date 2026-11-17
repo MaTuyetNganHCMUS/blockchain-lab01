@@ -36,7 +36,6 @@ from src.common.mocks import (
     MockState,
     MockVoteTracker,
 )
-from src.network.gossip import GossipManager
 from src.network.rate_limiter import RateLimiter, RateLimiterConfig
 from src.network.simulator import NetworkConfig, NetworkSimulator
 
@@ -61,6 +60,32 @@ def load_t5_config() -> dict:
     }
 
 
+class _TestBlockCache:
+    """Lightweight block cache helper for TV3 standalone partial synchrony test."""
+
+    def __init__(self, node_id: str, network: NetworkSimulator, crypto: MockCrypto) -> None:
+        self.node_id = node_id
+        self.network = network
+        self.crypto = crypto
+        self.accepted_headers: set[bytes] = set()
+        self.headers_by_hash: dict[bytes, BlockHeader] = {}
+        self.stored_bodies: dict[bytes, BlockBody] = {}
+        self.accepted_bodies: dict[bytes, BlockBody] = {}
+
+    def _compute_header_hash(self, header: BlockHeader) -> bytes:
+        return self.crypto.hash_bytes(self.crypto.encode_canonical(header))
+
+    def broadcast_header(self, header: BlockHeader, body: BlockBody | None = None) -> bytes:
+        h_hash = self._compute_header_hash(header)
+        self.accepted_headers.add(h_hash)
+        self.headers_by_hash[h_hash] = header
+        if body is not None:
+            self.stored_bodies[h_hash] = body
+        payload = self.crypto.encode_canonical(header)
+        self.network.broadcast_header(self.node_id, payload)
+        return h_hash
+
+
 class BFTTestNode:
     """Validator node agent simulating 2-phase Tendermint BFT over NetworkSimulator."""
 
@@ -82,7 +107,7 @@ class BFTTestNode:
         self.ledger = MockLedger()
         self.vote_tracker = MockVoteTracker(validator_count=len(validators))
         self.lock_manager = MockLockManager()
-        self.gossip = GossipManager(node_id=node_id, network=simulator, crypto=crypto)
+        self.gossip = _TestBlockCache(node_id=node_id, network=simulator, crypto=crypto)
 
         self.height = 1
         self.round = 0
