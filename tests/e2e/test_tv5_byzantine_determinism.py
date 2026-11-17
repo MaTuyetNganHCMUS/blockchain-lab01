@@ -2,7 +2,7 @@
 
 import json
 
-from scripts.verify_tv5_determinism import verify_determinism
+from src.security.determinism import verify_determinism
 from src.security.scenarios import run_equivocation_scenario
 
 

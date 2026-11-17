@@ -39,6 +39,10 @@
 | `docs/00_System_Architecture_And_Diagrams.md` | Bổ sung bảng chiến lược truyền tin (Bounded Gossip, Broadcast, Req/Resp, Direct Fanout) và chuẩn hóa nhãn sơ đồ | Nhất quán tài liệu kiến trúc toàn diện của dự án. |
 | `docs/TV5_HANDOVER_AND_REVIEW_KHANH.md` | Xóa tham chiếu file `src/network/gossip.py` trong bảng phân công phân hệ | Đồng bộ tài liệu bàn giao. |
 | `README.md` | Cập nhật mô tả thư mục `src/network/` thành `packet delivery & rate limiting` | Chính xác hóa cấu trúc project. |
+| `src/security/determinism.py` | Tạo mới chứa hàm `verify_determinism` chuyển từ `scripts/` vào | Đảm bảo test suite không phụ thuộc folder `scripts/` khi nộp bài. |
+| `src/security/__init__.py` | Export `verify_determinism` | Công khai hàm xác thực tính tất định qua package `src.security`. |
+| `tests/e2e/test_tv5_byzantine_determinism.py` | Đổi import `verify_determinism` từ `scripts.` sang `src.security.determinism` | Triệt tiêu hoàn toàn lỗi `ModuleNotFoundError: No module named 'scripts'` khi chạy test trên thư mục nộp bài. |
+| `scripts/verify_tv5_determinism.py` | Import `verify_determinism` từ `src.security.determinism` | Giữ nguyên CLI runner độc lập mà tái sử dụng logic từ core module. |
 
 ---
 
