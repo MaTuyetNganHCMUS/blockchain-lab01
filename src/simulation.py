@@ -290,11 +290,17 @@ def run_scenario(
     f, quorum = validate_bft_validator_set([f"node{i}" for i in range(n)])
 
     if scenario == "determinism":
-        first = run_scenario("partial_synchrony", cfg)
-        second = run_scenario("partial_synchrony", cfg)
-        log_path_str: str | None = None
+        run_1_out: Path | None = None
+        run_2_out: Path | None = None
         if out_path is not None:
             out_path.mkdir(parents=True, exist_ok=True)
+            run_1_out = out_path / "run-1.log"
+            run_2_out = out_path / "run-2.log"
+
+        first = run_scenario("partial_synchrony", cfg, output_path=run_1_out)
+        second = run_scenario("partial_synchrony", cfg, output_path=run_2_out)
+        log_path_str: str | None = None
+        if out_path is not None:
             report_file = out_path / "determinism_summary.json"
             report_file.write_text(
                 json.dumps(
@@ -310,7 +316,10 @@ def run_scenario(
                 + "\n",
                 encoding="utf-8",
             )
-            log_path_str = str(report_file)
+            run_log_file = out_path / "run.log"
+            if run_1_out is not None and run_1_out.exists():
+                run_log_file.write_bytes(run_1_out.read_bytes())
+            log_path_str = str(run_log_file if run_log_file.exists() else report_file)
         passed = (
             first.passed
             and second.passed
