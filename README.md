@@ -133,23 +133,6 @@ To run a specific test suite:
 
 ---
 
-## Submission Packaging & Verification
-
-To verify that the project is completely self-contained and builds a valid submission archive matching all course requirements:
-
-```bash
-./prepare_submission.sh
-```
-
-The script automatically:
-1. Prepares the submission directory with only allowed folders and files (`REPORT.pdf`, `README.md`, `config/`, `logs/`, `src/`, `tests/`).
-2. Creates an isolated temporary virtual environment and installs dependencies (`cryptography`, `pytest`).
-3. Executes the full test suite in the isolated environment to guarantee zero external/missing dependencies.
-4. Compares legal and test file manifests to ensure 100% byte-identical consistency.
-5. Compresses the verified submission into `submission/Lab01_23120029_23120048_23120282_23120308.zip`.
-
----
-
 ## Project Structure
 
 ```text
@@ -173,28 +156,3 @@ blockchain-lab01/
     |-- unit/                Unit tests (crypto, execution, network, consensus, security)
     `-- e2e/                 End-to-end integration tests (T1-T8 scenarios)
 ```
-
-## Module Notes
-
-- **TV1 Cryptography (`src/crypto/`, `src/common/serializer.py`):**
-  - Canonical tagged encoding (big-endian integers, length-prefixed strings/bytes, declaration-ordered dataclasses, sorted dictionaries).
-  - Ed25519 digital signatures and SHA-256 with domain separation prefixes (`TX:<chain_id>`, `HEADER:<chain_id>`, `VOTE:<chain_id>`).
-  - Key registry mapping validator IDs to public keys.
-
-- **TV2 Execution Engine (`src/execution/`):**
-  - Account state management and transfer execution with nonce checks.
-  - State root calculation and deterministic block execution.
-  - Bounded mempool with FIFO eviction and replay prevention.
-
-- **TV3 Network Simulation (`src/network/`):**
-  - Discrete-event network simulation with configurable latency, jitter, and packet loss.
-  - Partition modeling (pre-GST and post-GST transitions).
-
-- **TV4 BFT Consensus (`src/consensus/`):**
-  - Tendermint-style 2-phase consensus FSM (`PROPOSE` -> `PREVOTE` -> `PRECOMMIT` -> `COMMIT`).
-  - Header-before-Body protocol (`ConsensusFSM` + `ValidatorNode`): nodes broadcast and vote on compact BlockHeaders, pulling full BlockBodies on-demand before commit.
-  - Locking and unlocking rules to ensure safety under partial synchrony.
-
-- **TV5 Security & Determinism (`src/security/`, `src/observability/`):**
-  - Resilience against up to $f = \lfloor(n-1)/3\rfloor$ Byzantine equivocators.
-  - Deterministic event logging with SHA-256 digest comparison across executions with identical seeds.
